@@ -2,6 +2,12 @@ extern crate chrono;
 
 use chrono::{DateTime,UTC};
 use std::collections::HashMap;
+use std::error::{Error};
+use std::fmt;
+use std::string;
+use std::io;
+use std::convert;
+use std::sync::mpsc;
 
 #[derive(Debug)]
 pub enum State {
@@ -57,8 +63,26 @@ pub struct InternalError {
 }
 
 impl InternalError {
-	fn new(reason: &str) -> InternalError {
+	pub fn new(reason: String) -> InternalError {
 		InternalError { reason: reason }
+	}
+}
+
+impl fmt::Display for InternalError {
+	fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+		self.reason.fmt(formatter)
+	}
+}
+
+// TODO: these impls are all the same. can't we use generics?
+impl    convert::From<io::Error>             for InternalError { fn from(err: io::Error            ) -> InternalError { InternalError::new(String::from_str(err.description())) } }
+impl    convert::From<mpsc::RecvError>       for InternalError { fn from(err: mpsc::RecvError      ) -> InternalError { InternalError::new(String::from_str(err.description())) } }
+impl    convert::From<string::FromUtf8Error> for InternalError { fn from(err: string::FromUtf8Error) -> InternalError { InternalError::new(String::from_str(err.description())) } }
+impl<T> convert::From<mpsc::SendError<T>>    for InternalError { fn from(err: mpsc::SendError<T>   ) -> InternalError { InternalError::new(format!("{}", err)) } }
+
+impl Error for InternalError {
+	fn description(&self) -> &str {
+		self.reason.as_str()
 	}
 }
 
@@ -75,7 +99,7 @@ pub trait PollMonitor {
 }
 
 pub trait Monitor {
-	fn scan(&self) -> Result<InternalError, HashMap<&str, PollResult>>;
+	fn scan(&self) -> Result<HashMap<String, PollResult>, InternalError>;
 }
 
 
