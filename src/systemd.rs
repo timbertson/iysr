@@ -209,7 +209,7 @@ impl SystemdMonitor {
 	}
 }
 
-impl <'a> Monitor<> for SystemdMonitor {
+impl Monitor for SystemdMonitor {
 	fn scan(&self) -> Result<HashMap<String, PollResult>, InternalError> {
 		let mut child = try!(self.spawn());
 		self.parse(&mut child)

@@ -4,3 +4,8 @@ version = "0.0.1"
 
 [dependencies]
 chrono = "0.2.14"
+
+# server
+hyper = "*"
+rustc-serialize = "*"
+log = "*"
