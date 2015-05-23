@@ -3,13 +3,16 @@ use std::process::{Command,Stdio,Child};
 use std::thread;
 use std::char;
 use std::io;
+use std::convert;
 use std::sync::mpsc;
+use std::sync::{Arc};
 use std::io::{BufRead, BufReader};
+use rustc_serialize::json::{Json};
 use monitor::*;
-use chrono::{DateTime,UTC};
 
 pub struct SystemdMonitor {
 	ignored_types: HashSet<String>,
+	user: bool,
 }
 
 fn read_all(source: &mut io::Read) -> Result<String, InternalError> {
@@ -25,8 +28,9 @@ pub enum RuntimeError {
 	UnexpectedBlankLine,
 	ChildOutputStreamMissing,
 	BadServiceName,
+	MissingProperty(&'static str),
 }
-impl ::std::convert::From<RuntimeError> for InternalError {
+impl convert::From<RuntimeError> for InternalError {
 	fn from(err: RuntimeError) -> InternalError {
 		// TODO: nice error messages
 		InternalError::new(format!("{:?}", err))
@@ -34,15 +38,35 @@ impl ::std::convert::From<RuntimeError> for InternalError {
 }
 
 impl SystemdMonitor {
-	pub fn new() -> SystemdMonitor {
-		let ignored = HashSet::new();
+	fn new(user: bool) -> SystemdMonitor {
+		let mut ignored = HashSet::new();
+		// XXX make configurable
+		ignored.insert(String::from_str("device"));
+		ignored.insert(String::from_str("target"));
 		SystemdMonitor {
 			ignored_types: ignored,
+			user: user,
+		}
+	}
+
+	pub fn system() -> SystemdMonitor {
+		Self::new(false)
+	}
+
+	pub fn user() -> SystemdMonitor {
+		Self::new(true)
+	}
+
+	fn common_args<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
+		if self.user {
+			cmd.arg("--user")
+		} else {
+			cmd
 		}
 	}
 
 	fn spawn(&self) -> Result<Child, InternalError> {
-		let child = Command::new("systemctl")
+		let child = self.common_args(&mut Command::new("systemctl"))
 				.arg("list-units")
 				.arg("--no-pager")
 				.arg("--no-legend")
@@ -63,12 +87,11 @@ impl SystemdMonitor {
 		parts.next().ok_or(RuntimeError::UnexpectedBlankLine)
 	}
 
-	fn get_unit_statuses(&self, units: &Vec<String>) -> Result<Vec<PollResult>, InternalError> {
+	fn get_unit_statuses(&self, units: &Vec<String>) -> Result<Vec<Status>, InternalError> {
 		assert!(units.len() > 0);
-		let check_time = UTC::now();
-		match Command::new("systemctl")
+		match self.common_args(&mut Command::new("systemctl"))
 			.arg("show")
-			.arg("--property=LoadState,ActiveState,SubState,Result")
+			.arg("--property=ActiveState,SubState,Result")
 			.arg("--")
 			.args(units)
 			.stdout(Stdio::piped())
@@ -83,24 +106,38 @@ impl SystemdMonitor {
 				let stdout = BufReader::new(try!(child.stdout.take().ok_or(RuntimeError::ChildOutputStreamMissing)));
 				let mut stderr = try!(child.stderr.take().ok_or(RuntimeError::ChildOutputStreamMissing));
 
-				fn process_props(time:DateTime<UTC>, props: &mut HashMap<String,String>) -> Result<PollResult, InternalError> {
+				fn process_props(props: &mut HashMap<String,String>) -> Result<Status, InternalError> {
 					// TODO: actual status from current_props
-					props.clear();
-					Ok(PollResult {
-						state: State::Running,
-						time: time,
+					let state = match props.remove("ActiveState") {
+						None => return Err(
+							InternalError::from(RuntimeError::MissingProperty("ActiveState"))
+						),
+						Some(state) => match state.as_str() {
+							"active" | "reloading" | "activating" => State::Active,
+							"inactive" | "deactivating" => State::Inactive,
+							"failed" => State::Error,
+							_ => State::Unknown,
+						}
+					};
+					let mut attrs = HashMap::with_capacity(props.len());
+					for (key, val) in props.drain() {
+						attrs.insert(key, Json::String(val));
+					}
+					Ok(Status {
+						state: state,
+						attrs: Arc::new(attrs),
 					})
 				}
 
 				let ok_t = try!(thread::Builder::new().scoped(|| {
-					let mut rv : Vec<PollResult> = Vec::new();
+					let mut rv : Vec<Status> = Vec::new();
 					let mut current_props = HashMap::new();
 					for line_r in stdout.lines() {
 						let line = try!(line_r);
 						if line.len() == 0 {
 							// separator line - start new properties
-							rv.push(try!(process_props(check_time, &mut current_props)));
-							current_props = HashMap::new();
+							rv.push(try!(process_props(&mut current_props)));
+							current_props.clear();
 						} else {
 							let mut parts = line.splitn(2, '=');
 							let key = parts.next();
@@ -117,7 +154,7 @@ impl SystemdMonitor {
 						}
 					}
 					if !current_props.is_empty() {
-						rv.push(try!(process_props(check_time, &mut current_props)));
+						rv.push(try!(process_props(&mut current_props)));
 					}
 					Ok(rv)
 				}));
@@ -136,7 +173,7 @@ impl SystemdMonitor {
 		}
 	}
 
-	fn process_unit_statuses(&self, rv: &mut HashMap<String,PollResult>, units: &mut Vec<String>)
+	fn process_unit_statuses(&self, rv: &mut HashMap<String,Status>, units: &mut Vec<String>)
 		-> Result<(), InternalError>
 	{
 		//println!("running execv with {} units", units.len());
@@ -147,7 +184,7 @@ impl SystemdMonitor {
 		Ok(())
 	}
 
-	fn parse(&self, child: &mut Child) -> Result<HashMap<String, PollResult>, InternalError> {
+	fn parse(&self, child: &mut Child) -> Result<HashMap<String, Status>, InternalError> {
 		let stdout = BufReader::new(try!(child.stdout.take().ok_or(RuntimeError::ChildOutputStreamMissing)));
 		let mut stderr = try!(child.stderr.take().ok_or(RuntimeError::ChildOutputStreamMissing));
 
@@ -184,8 +221,10 @@ impl SystemdMonitor {
 			for line_r in stdout.lines() {
 				let line = try!(line_r);
 				let unit = try!(self.parse_unit_name(&line));
-				let unit_type = try!(line.rsplit('.').next().ok_or(RuntimeError::BadServiceName));
+				let unit_type = try!(unit.rsplit('.').next().ok_or(RuntimeError::BadServiceName));
+				//debug!("unit type: {}, ignored_types = {:?}", unit_type, self.ignored_types);
 				if self.ignored_types.contains(unit_type) {
+					debug!("ignoring unit: {}", unit);
 					continue;
 				}
 				try!(sender.send(Some(String::from_str(unit))));
@@ -210,7 +249,7 @@ impl SystemdMonitor {
 }
 
 impl Monitor for SystemdMonitor {
-	fn scan(&self) -> Result<HashMap<String, PollResult>, InternalError> {
+	fn scan(&self) -> Result<HashMap<String, Status>, InternalError> {
 		let mut child = try!(self.spawn());
 		self.parse(&mut child)
 	}

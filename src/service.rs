@@ -8,7 +8,9 @@ use monitor::InternalError;
 use system_monitor::SystemMonitor;
 use hyper::server::{Request,Response,Handler};
 use hyper::net::{Fresh,Streaming};
+use hyper::header;
 use schedule_recv;
+use rustc_serialize::json;
 
 struct Server {
 	monitor: Mutex<Box<SystemMonitor>>,
@@ -34,7 +36,7 @@ fn write_sse_part(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<
 }
 fn write_sse_keepalive(dest: &mut io::Write) -> io::Result<()> {
 	// XXX leaving out the dots seems to cause nothing to be written. bug in the current nightly?
-	_write_sse(dest, "", "...", false);
+	try!(_write_sse(dest, "", "...", false));
 	dest.flush()
 }
 
@@ -47,11 +49,13 @@ impl Server {
 		loop {
 			let timer = schedule_recv::oneshot_ms(1500);
 			select!(
-				//data = receiver.recv() => {
-				//	// TODO: json
-				//	let data = format!("dump -- {:?}", data);
-				//	try!(write_sse(response, "data", &data));
-				//},
+				data = receiver.recv() => {
+					// TODO: lazy (asJson) encoding?
+					let data = try!(data);
+					let data = try!(json::encode(&data));
+					//try!(write_sse_part(response, "event", &"state"));
+					try!(write_sse(response, "data", &data));
+				},
 				_ = timer.recv() => {
 					try!(write_sse_keepalive(response));
 				}
@@ -67,7 +71,20 @@ impl Server {
 }
 
 impl Handler for Server {
-	fn handle<'a, 'k>(&'a self, _: Request<'a, 'k>, response: Response<'a, Fresh>) {
+	fn handle<'a, 'k>(&'a self, _: Request<'a, 'k>, mut response: Response<'a, Fresh>) {
+		{
+			use hyper::header::*;
+			use hyper::mime::*;
+			let headers = response.headers_mut();
+			headers.set(AccessControlAllowOrigin::Any);
+			headers.set(ContentType(
+				Mime(
+					TopLevel::Text,
+					SubLevel::Ext(String::from_str("event-stream")),
+					Vec::new()
+				)
+			));
+		}
 		match response.start() {
 			Err(e) => debug!("Unable to start response: {}", e),
 			Ok(mut response) => {
@@ -89,12 +106,6 @@ impl Handler for Server {
 			}
 		}
 	}
-}
-
-fn stream_events(_: Request, res: Response<Fresh>) {
-	let mut res = res.start().unwrap();
-	res.write_all(b"Hello World!").unwrap();
-	res.end().unwrap();
 }
 
 pub fn main(monitor: SystemMonitor) {

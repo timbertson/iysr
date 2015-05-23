@@ -8,6 +8,7 @@ extern crate chrono;
 extern crate hyper;
 extern crate env_logger;
 extern crate schedule_recv;
+extern crate rustc_serialize;
 
 #[macro_use]
 extern crate log;
@@ -26,13 +27,8 @@ use systemd::*;
 
 fn main () {
 	env_logger::init().unwrap();
-	let mut monitor = SystemMonitor::new(5000);
-	monitor.add(String::from_str("systemd"), Box::new(SystemdMonitor::new())).unwrap();
-	//let monitor = SystemdMonitor::new();
-	//let rv = monitor.scan();
-	//match rv {
-	//	Ok(rv) => println!("OK: {:?}", rv),
-	//	Err(e) => println!("Error: {}", e),
-	//}
+	let mut monitor = SystemMonitor::new(10000);
+	monitor.add(String::from_str("systemd.system"), Box::new(SystemdMonitor::system())).unwrap();
+	//monitor.add(String::from_str("systemd.user"), Box::new(SystemdMonitor::user())).unwrap();
 	service::main(monitor);
 }

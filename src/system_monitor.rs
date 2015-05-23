@@ -6,26 +6,84 @@ use std::collections::hash_map::{Entry};
 use std::sync::mpsc;
 use std::sync::{Arc,Mutex};
 use std::thread;
+use std::fmt;
 use std::ops::Deref;
 use monitor::*;
+use rustc_serialize::{Encoder,Encodable};
+use rustc_serialize::json;
+use rustc_serialize::json::Json;
+use chrono::Timelike;
 
 
+pub struct Time(DateTime<UTC>);
+impl Time {
+	fn timestamp(&self) -> i64 {
+		let Time(t) = *self;
+		t.timestamp()
+	}
+	fn time(&self) -> chrono::NaiveTime {
+		let Time(t) = *self;
+		t.time()
+	}
+}
+impl fmt::Debug for Time {
+	fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+		let Time(t) = *self;
+		t.fmt(f)
+	}
+}
+
+impl Encodable for Time {
+	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
+		encoder.emit_struct("Time", 2, |encoder| {
+			try!(encoder.emit_struct_field("sec", 0usize, |e| self.timestamp().encode(e)));
+			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000).encode(e)));
+			Ok(())
+		})
+	}
+}
 
 #[derive(Debug)]
 pub struct SystemState {
-	pub time: DateTime<UTC>,
-	pub sources: HashMap<String, Result<HashMap<String, PollResult>, InternalError>>,
+	pub time: Time,
+	pub sources: HashMap<String, Result<HashMap<String, Status>, InternalError>>,
 }
-//impl Clone for SystemState {
-//	fn clone(&self) -> Self {
-//		SystemState {
-//			time: self.time,
-//			sources: self.sources.clone(),
-//		}
-//	}
-//}
-//
 type Listeners = HashMap<u32, mpsc::SyncSender<Arc<SystemState>>>;
+
+impl Encodable for SystemState {
+	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
+		encoder.emit_struct("SystemState", 2, |encoder| {
+			try!(encoder.emit_struct_field("time", 0usize, |e| self.time.encode(e)));
+			try!(encoder.emit_struct_field("sources", 1usize, |encoder| {
+				try!(encoder.emit_map(self.sources.len(), |encoder| {
+					let mut idx = 0usize;
+					for (key, val) in self.sources.iter() {
+						try!(encoder.emit_map_elt_key(idx, |e| key.encode(e)));
+						try!(encoder.emit_map_elt_val(idx, |encoder| {
+							try!(encoder.emit_struct_field("Result", 0usize, |encoder| {
+								match *val {
+									Ok(ref v) => {
+										try!(encoder.emit_struct_field("ok", 0usize, |e| v.encode(e)));
+									},
+									Err(ref v) => {
+										try!(encoder.emit_struct_field("err", 0usize, |e| v.encode(e)));
+									},
+								};
+								Ok(())
+							}));
+							Ok(())
+						}));
+						idx += 1;
+					}
+					Ok(())
+				}));
+				Ok(())
+			}));
+			Ok(())
+		})
+	}
+}
+
 
 struct SharedState {
 	monitors: HashMap<String, Arc<Box<Monitor>>>,
@@ -126,7 +184,7 @@ impl SystemMonitor {
 	fn run_loop(sleep_ms: u32, shared: Arc<Mutex<SharedState>>, listeners: Arc<Mutex<Listeners>>) {
 		// XXX stop loop when last listener deregisters
 		loop {
-			let time = UTC::now();
+			let time = Time(UTC::now());
 			let mut sources = HashMap::new();
 			let monitors = {
 				let shared = shared.lock().unwrap();

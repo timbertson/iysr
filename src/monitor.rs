@@ -8,13 +8,16 @@ use std::string;
 use std::io;
 use std::convert;
 use std::sync::mpsc;
+use std::sync::{Arc};
+use rustc_serialize::json::{Json};
+use rustc_serialize::json;
 
-#[derive(Debug)]
+#[derive(Debug, RustcEncodable)]
 pub enum State {
-	Running,
-	Stopped,
-	Missing,
+	Active,
+	Inactive,
 	Error,
+	Unknown,
 }
 
 #[derive(Debug)]
@@ -29,16 +32,13 @@ pub enum Severity {
 	Debug,
 }
 
-#[derive(Debug)]
-pub struct PollResult {
-	pub state: State,
-	pub time: DateTime<UTC>,
-}
+pub type Attributes = HashMap<String, Json>;
 
-//#[derive(Debug)]
-//pub struct Tags<'a> {
-//	  pub tags: &'a [&'a str],
-//}
+#[derive(Debug, RustcEncodable)]
+pub struct Status {
+	pub state: State,
+	pub attrs: Arc<Attributes>,
+}
 
 #[derive(Debug)]
 pub struct Service<'a> {
@@ -46,18 +46,11 @@ pub struct Service<'a> {
 }
 
 #[derive(Debug)]
-pub struct Status<'a> {
-	pub state: State,
-	pub service: &'a Service<'a>,
-	pub time: DateTime<UTC>,
-}
-
-#[derive(Debug)]
 pub struct Message<'a> {
 	pub content: &'a str,
 }
 
-#[derive(Debug)]
+#[derive(Debug, RustcEncodable)]
 pub struct InternalError {
 	pub reason: String,
 }
@@ -82,6 +75,7 @@ impl fmt::Display for InternalError {
 impl    convert::From<io::Error>             for InternalError { fn from(err: io::Error            ) -> InternalError { InternalError::wrap(&err) } }
 impl    convert::From<mpsc::RecvError>       for InternalError { fn from(err: mpsc::RecvError      ) -> InternalError { InternalError::wrap(&err) } }
 impl    convert::From<string::FromUtf8Error> for InternalError { fn from(err: string::FromUtf8Error) -> InternalError { InternalError::wrap(&err) } }
+impl    convert::From<json::EncoderError>    for InternalError { fn from(err: json::EncoderError   ) -> InternalError { InternalError::wrap(&err) } }
 impl<T> convert::From<mpsc::SendError<T>>    for InternalError { fn from(err: mpsc::SendError<T>   ) -> InternalError { InternalError::new(format!("{}", err)) } }
 
 impl Error for InternalError {
@@ -99,9 +93,9 @@ pub enum Event <'a> {
 pub trait PollMonitor {
 	type T;
 	fn refresh(&self) { return }
-	fn poll(&self, &Self::T) -> PollResult;
+	fn poll(&self, &Self::T) -> Status;
 }
 
 pub trait Monitor: Send + Sync {
-	fn scan(&self) -> Result<HashMap<String, PollResult>, InternalError>;
+	fn scan(&self) -> Result<HashMap<String, Status>, InternalError>;
 }
