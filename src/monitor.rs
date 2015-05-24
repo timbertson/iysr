@@ -71,12 +71,38 @@ impl fmt::Display for InternalError {
 	}
 }
 
-// TODO: these impls are all the same. can't we use generics?
-impl    convert::From<io::Error>             for InternalError { fn from(err: io::Error            ) -> InternalError { InternalError::wrap(&err) } }
-impl    convert::From<mpsc::RecvError>       for InternalError { fn from(err: mpsc::RecvError      ) -> InternalError { InternalError::wrap(&err) } }
-impl    convert::From<string::FromUtf8Error> for InternalError { fn from(err: string::FromUtf8Error) -> InternalError { InternalError::wrap(&err) } }
-impl    convert::From<json::EncoderError>    for InternalError { fn from(err: json::EncoderError   ) -> InternalError { InternalError::wrap(&err) } }
-impl<T> convert::From<mpsc::SendError<T>>    for InternalError { fn from(err: mpsc::SendError<T>   ) -> InternalError { InternalError::new(format!("{}", err)) } }
+// TODO: It'd be nice if we could implement all these through generics,
+// but a repetitive macro will do....
+macro_rules! coerce_to_internal_error {
+	(generic($($t:ty, $g:ident),*)) => {
+		$(
+		impl<$g:Send+::std::any::Any> convert::From<$t> for InternalError {
+			fn from(err: $t) -> InternalError {
+				InternalError::wrap(&err)
+			}
+		}
+		)*
+	};
+	($($t:path),*) => {
+		$(
+		impl convert::From<$t> for InternalError {
+			fn from(err: $t) -> InternalError {
+				InternalError::wrap(&err)
+			}
+		}
+		)*
+	}
+}
+coerce_to_internal_error!(
+	  io::Error
+	, mpsc::RecvError
+	, string::FromUtf8Error
+	, json::EncoderError
+	, chrono::format::ParseError
+);
+coerce_to_internal_error!(
+	  generic(mpsc::SendError<T>, T)
+);
 
 impl Error for InternalError {
 	fn description(&self) -> &str {
@@ -97,5 +123,6 @@ pub trait PollMonitor {
 }
 
 pub trait Monitor: Send + Sync {
+	fn typ(&self) -> String;
 	fn scan(&self) -> Result<HashMap<String, Status>, InternalError>;
 }

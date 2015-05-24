@@ -37,16 +37,22 @@ impl Encodable for Time {
 	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
 		encoder.emit_struct("Time", 2, |encoder| {
 			try!(encoder.emit_struct_field("sec", 0usize, |e| self.timestamp().encode(e)));
-			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000).encode(e)));
+			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000000).encode(e)));
 			Ok(())
 		})
 	}
 }
 
 #[derive(Debug)]
+pub struct SourceStatus {
+	typ: String,
+	status: Result<HashMap<String, Status>, InternalError>,
+}
+
+#[derive(Debug)]
 pub struct SystemState {
 	pub time: Time,
-	pub sources: HashMap<String, Result<HashMap<String, Status>, InternalError>>,
+	pub sources: HashMap<String, SourceStatus>,
 }
 type Listeners = HashMap<u32, mpsc::SyncSender<Arc<SystemState>>>;
 
@@ -54,14 +60,16 @@ impl Encodable for SystemState {
 	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
 		encoder.emit_struct("SystemState", 2, |encoder| {
 			try!(encoder.emit_struct_field("time", 0usize, |e| self.time.encode(e)));
-			try!(encoder.emit_struct_field("sources", 1usize, |encoder| {
+			try!(encoder.emit_struct_field("type", 1usize, |e| "system".encode(e)));
+			try!(encoder.emit_struct_field("sources", 2usize, |encoder| {
 				try!(encoder.emit_map(self.sources.len(), |encoder| {
+					use monitor::Monitor;
 					let mut idx = 0usize;
-					for (key, val) in self.sources.iter() {
+					for (key, source) in self.sources.iter() {
 						try!(encoder.emit_map_elt_key(idx, |e| key.encode(e)));
 						try!(encoder.emit_map_elt_val(idx, |encoder| {
-							try!(encoder.emit_struct_field("Result", 0usize, |encoder| {
-								match *val {
+							try!(encoder.emit_struct("Result", 2usize, |encoder| {
+								match source.status {
 									Ok(ref v) => {
 										try!(encoder.emit_struct_field("ok", 0usize, |e| v.encode(e)));
 									},
@@ -69,6 +77,7 @@ impl Encodable for SystemState {
 										try!(encoder.emit_struct_field("err", 0usize, |e| v.encode(e)));
 									},
 								};
+								try!(encoder.emit_struct_field("type", 1usize, |e| source.typ.encode(e)));
 								Ok(())
 							}));
 							Ok(())
@@ -192,7 +201,10 @@ impl SystemMonitor {
 			};
 			for (name, monitor) in monitors.iter() {
 				// XXX can we not clone this?
-				sources.insert(name.clone(), monitor.scan());
+				sources.insert(name.clone(), SourceStatus {
+					typ: monitor.typ(),
+					status: monitor.scan()
+				});
 			}
 
 			let state = Arc::new(SystemState {

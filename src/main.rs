@@ -22,13 +22,14 @@ mod service;
 pub use monitor::*;
 pub use system_monitor::*;
 use systemd::*;
+use chrono::DateTime;
 
 
 
 fn main () {
 	env_logger::init().unwrap();
-	let mut monitor = SystemMonitor::new(10000);
+	let mut monitor = SystemMonitor::new(20000);
 	monitor.add(String::from_str("systemd.system"), Box::new(SystemdMonitor::system())).unwrap();
-	//monitor.add(String::from_str("systemd.user"), Box::new(SystemdMonitor::user())).unwrap();
+	monitor.add(String::from_str("systemd.user"), Box::new(SystemdMonitor::user())).unwrap();
 	service::main(monitor);
 }

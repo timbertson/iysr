@@ -35,8 +35,7 @@ fn write_sse_part(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<
 	_write_sse(dest, prefix, data, false)
 }
 fn write_sse_keepalive(dest: &mut io::Write) -> io::Result<()> {
-	// XXX leaving out the dots seems to cause nothing to be written. bug in the current nightly?
-	try!(_write_sse(dest, "", "...", false));
+	try!(write!(dest, ":\n"));
 	dest.flush()
 }
 

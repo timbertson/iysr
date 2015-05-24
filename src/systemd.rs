@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::sync::{Arc};
 use std::io::{BufRead, BufReader};
 use rustc_serialize::json::{Json};
+use chrono::{DateTime,Local};
 use monitor::*;
 
 pub struct SystemdMonitor {
@@ -43,6 +44,9 @@ impl SystemdMonitor {
 		// XXX make configurable
 		ignored.insert(String::from_str("device"));
 		ignored.insert(String::from_str("target"));
+		ignored.insert(String::from_str("slice"));
+		ignored.insert(String::from_str("machine"));
+		ignored.insert(String::from_str("mount"));
 		SystemdMonitor {
 			ignored_types: ignored,
 			user: user,
@@ -87,11 +91,13 @@ impl SystemdMonitor {
 		parts.next().ok_or(RuntimeError::UnexpectedBlankLine)
 	}
 
+	// TODO: use dbus interface to avoid lots of forking overhead, and to
+	// allow notifications on signal change (rather than polling)
 	fn get_unit_statuses(&self, units: &Vec<String>) -> Result<Vec<Status>, InternalError> {
 		assert!(units.len() > 0);
 		match self.common_args(&mut Command::new("systemctl"))
 			.arg("show")
-			.arg("--property=ActiveState,SubState,Result")
+			.arg("--property=ActiveState,SubState,Result,ExecMainExitTimestamp,ExecMainStartTimestamp,StatusText")
 			.arg("--")
 			.args(units)
 			.stdout(Stdio::piped())
@@ -121,7 +127,39 @@ impl SystemdMonitor {
 					};
 					let mut attrs = HashMap::with_capacity(props.len());
 					for (key, val) in props.drain() {
-						attrs.insert(key, Json::String(val));
+						if val.len() == 0 {
+							continue;
+						}
+						let _ : Option<Json> /* ensure each branch inserts the key */ = if key.ends_with("Timestamp") {
+							// e.g. Sun 2015-05-24 13:59:07 AEST
+							// chrono doesn't support `%Z` timezone specifier, so we
+							// strip it off and assume all timestamps are local:
+							let date_val = val.clone();
+							let mut parts = date_val.rsplitn(2, " ");
+							let tz = parts.next();
+							match (tz, parts.next()) {
+								// XXX check `tz` against the current local timezone abbreviation
+								(Some(_), Some(date_val)) => {
+									use chrono::offset::TimeZone;
+									let local_time = Local::now();
+									match local_time.timezone().datetime_from_str(&date_val, "%a %F %T") {
+										Ok(ts) => {
+											attrs.insert(key, Json::I64(ts.timestamp()))
+										},
+										Err(err) => {
+											info!("Unable to parse timestamp [{}]: {}", date_val, err);
+											attrs.insert(key, Json::String(val))
+										}
+									}
+								},
+								_ => {
+									info!("timestamp doesn't have any spaces");
+									attrs.insert(key, Json::String(val))
+								},
+							}
+						} else {
+							attrs.insert(key, Json::String(val))
+						};
 					}
 					Ok(Status {
 						state: state,
@@ -249,6 +287,9 @@ impl SystemdMonitor {
 }
 
 impl Monitor for SystemdMonitor {
+	fn typ(&self) -> String {
+		return String::from_str("systemd");
+	}
 	fn scan(&self) -> Result<HashMap<String, Status>, InternalError> {
 		let mut child = try!(self.spawn());
 		self.parse(&mut child)
