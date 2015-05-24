@@ -1,7 +1,7 @@
 extern crate chrono;
 
 use chrono::{DateTime,UTC};
-use std::collections::HashMap;
+use std::collections::{HashMap,BTreeMap};
 use std::collections::hash_map::{Entry};
 use std::sync::mpsc;
 use std::sync::{Arc,Mutex};
@@ -11,7 +11,7 @@ use std::ops::Deref;
 use monitor::*;
 use rustc_serialize::{Encoder,Encodable};
 use rustc_serialize::json;
-use rustc_serialize::json::Json;
+use rustc_serialize::json::{Json,ToJson};
 use chrono::Timelike;
 
 
@@ -33,13 +33,38 @@ impl fmt::Debug for Time {
 	}
 }
 
-impl Encodable for Time {
-	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
-		encoder.emit_struct("Time", 2, |encoder| {
-			try!(encoder.emit_struct_field("sec", 0usize, |e| self.timestamp().encode(e)));
-			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000000).encode(e)));
-			Ok(())
-		})
+//impl Encodable for Time {
+//	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
+//		encoder.emit_struct("Time", 2, |encoder| {
+//			try!(encoder.emit_struct_field("sec", 0usize, |e| self.timestamp().encode(e)));
+//			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000000).encode(e)));
+//			Ok(())
+//		})
+//	}
+//}
+
+impl ToJson for Time {
+	fn to_json(&self) -> Json {
+		let mut attrs = BTreeMap::new();
+		attrs.insert(String::from_str("sec"), Json::I64(self.timestamp()));
+		attrs.insert(String::from_str("ms"), Json::U64((self.time().nanosecond() / 1000000) as u64));
+		Json::Object(attrs)
+	}
+}
+
+impl ToJson for SourceStatus {
+	fn to_json(&self) -> Json {
+		let mut attrs = BTreeMap::new();
+		attrs.insert(String::from_str("type"), self.typ.to_json());
+		match self.status {
+			Ok(ref v) => {
+				attrs.insert(String::from_str("ok"), v.to_json());
+			},
+			Err(ref v) => {
+				attrs.insert(String::from_str("err"), v.to_json());
+			},
+		}
+		Json::Object(attrs)
 	}
 }
 
@@ -56,40 +81,50 @@ pub struct SystemState {
 }
 type Listeners = HashMap<u32, mpsc::SyncSender<Arc<SystemState>>>;
 
-impl Encodable for SystemState {
-	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
-		encoder.emit_struct("SystemState", 2, |encoder| {
-			try!(encoder.emit_struct_field("time", 0usize, |e| self.time.encode(e)));
-			try!(encoder.emit_struct_field("type", 1usize, |e| "system".encode(e)));
-			try!(encoder.emit_struct_field("sources", 2usize, |encoder| {
-				try!(encoder.emit_map(self.sources.len(), |encoder| {
-					use monitor::Monitor;
-					let mut idx = 0usize;
-					for (key, source) in self.sources.iter() {
-						try!(encoder.emit_map_elt_key(idx, |e| key.encode(e)));
-						try!(encoder.emit_map_elt_val(idx, |encoder| {
-							try!(encoder.emit_struct("Result", 2usize, |encoder| {
-								match source.status {
-									Ok(ref v) => {
-										try!(encoder.emit_struct_field("ok", 0usize, |e| v.encode(e)));
-									},
-									Err(ref v) => {
-										try!(encoder.emit_struct_field("err", 0usize, |e| v.encode(e)));
-									},
-								};
-								try!(encoder.emit_struct_field("type", 1usize, |e| source.typ.encode(e)));
-								Ok(())
-							}));
-							Ok(())
-						}));
-						idx += 1;
-					}
-					Ok(())
-				}));
-				Ok(())
-			}));
-			Ok(())
-		})
+//impl Encodable for SystemState {
+//	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
+//		encoder.emit_struct("SystemState", 2, |encoder| {
+//			try!(encoder.emit_struct_field("time", 0usize, |e| self.time.encode(e)));
+//			try!(encoder.emit_struct_field("type", 1usize, |e| "system".encode(e)));
+//			try!(encoder.emit_struct_field("sources", 2usize, |encoder| {
+//				try!(encoder.emit_map(self.sources.len(), |encoder| {
+//					use monitor::Monitor;
+//					let mut idx = 0usize;
+//					for (key, source) in self.sources.iter() {
+//						try!(encoder.emit_map_elt_key(idx, |e| key.encode(e)));
+//						try!(encoder.emit_map_elt_val(idx, |encoder| {
+//							try!(encoder.emit_struct("Result", 2usize, |encoder| {
+//								match source.status {
+//									Ok(ref v) => {
+//										try!(encoder.emit_struct_field("ok", 0usize, |e| v.encode(e)));
+//									},
+//									Err(ref v) => {
+//										try!(encoder.emit_struct_field("err", 0usize, |e| v.encode(e)));
+//									},
+//								};
+//								try!(encoder.emit_struct_field("type", 1usize, |e| source.typ.encode(e)));
+//								Ok(())
+//							}));
+//							Ok(())
+//						}));
+//						idx += 1;
+//					}
+//					Ok(())
+//				}));
+//				Ok(())
+//			}));
+//			Ok(())
+//		})
+//	}
+//}
+
+impl ToJson for SystemState {
+	fn to_json(&self) -> Json {
+		let mut root = BTreeMap::new();
+		root.insert(String::from_str("time"), self.time.to_json());
+		root.insert(String::from_str("type"), Json::String(String::from_str("system")));
+		root.insert(String::from_str("sources"), self.sources.to_json());
+		Json::Object(root)
 	}
 }
 

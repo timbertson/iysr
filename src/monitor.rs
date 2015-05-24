@@ -9,7 +9,7 @@ use std::io;
 use std::convert;
 use std::sync::mpsc;
 use std::sync::{Arc};
-use rustc_serialize::json::{Json};
+use rustc_serialize::json::{Json,ToJson};
 use rustc_serialize::json;
 
 #[derive(Debug, RustcEncodable)]
@@ -18,6 +18,12 @@ pub enum State {
 	Inactive,
 	Error,
 	Unknown,
+}
+
+impl ToJson for State {
+	fn to_json(&self) -> Json {
+		Json::String(format!("{:?}", self))
+	}
 }
 
 #[derive(Debug)]
@@ -34,11 +40,18 @@ pub enum Severity {
 
 pub type Attributes = HashMap<String, Json>;
 
-#[derive(Debug, RustcEncodable)]
+#[derive(Debug, RustcEncodable,ToJson)]
 pub struct Status {
 	pub state: State,
 	pub attrs: Arc<Attributes>,
 }
+
+//impl ToJson for Status {
+//	fn to_json(&self) -> Json {
+//		// XXX this is suboptimal ;)
+//		json::decode(json::encode(self));
+//	}
+//}
 
 #[derive(Debug)]
 pub struct Service<'a> {
@@ -107,6 +120,12 @@ coerce_to_internal_error!(
 impl Error for InternalError {
 	fn description(&self) -> &str {
 		self.reason.as_str()
+	}
+}
+
+impl ToJson for InternalError {
+	fn to_json(&self) -> Json {
+		self.reason.to_json()
 	}
 }
 

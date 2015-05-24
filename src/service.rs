@@ -2,6 +2,7 @@ extern crate hyper;
 
 use std::io;
 use std::io::{Write};
+use std::collections::BTreeMap;
 use std::sync::{Mutex};
 
 use monitor::InternalError;
@@ -11,6 +12,8 @@ use hyper::net::{Fresh,Streaming};
 use hyper::header;
 use schedule_recv;
 use rustc_serialize::json;
+use rustc_serialize::json::{Json,ToJson};
+use rustc_serialize::{Encodable};
 
 struct Server {
 	monitor: Mutex<Box<SystemMonitor>>,
@@ -31,9 +34,9 @@ fn _write_sse(dest: &mut io::Write, prefix: &str, data: &str, end: bool) -> io::
 fn write_sse(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<()> {
 	_write_sse(dest, prefix, data, true)
 }
-fn write_sse_part(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<()> {
-	_write_sse(dest, prefix, data, false)
-}
+//fn write_sse_part(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<()> {
+//	_write_sse(dest, prefix, data, false)
+//}
 fn write_sse_keepalive(dest: &mut io::Write) -> io::Result<()> {
 	try!(write!(dest, ":\n"));
 	dest.flush()
@@ -45,16 +48,38 @@ impl Server {
 			try!(self.monitor.lock().unwrap().subscribe())
 		};
 
+		let mut last_state = None;
 		loop {
 			let timer = schedule_recv::oneshot_ms(1500);
 			select!(
 				data = receiver.recv() => {
-					// TODO: lazy (asJson) encoding?
 					let data = try!(data);
+					let json = data.to_json();
+					let mut attrs = BTreeMap::new();
+					attrs.insert(String::from_str("type"), "state".to_json());
+					let overlay = String::from_str("overlay");
+					//let next_state = Some(json.clone());
+					let (next_state, update) = match last_state {
+						None => {
+							attrs.insert(overlay, "replace".to_json());
+							(json.clone(), json)
+						},
+						Some(_old_data) => {
+							/* TODO: diffing! */
+							attrs.insert(overlay, "diff".to_json());
+							(json.clone(), json)
+						}
+					};
+					last_state = Some(next_state);
+					attrs.insert(String::from_str("data"), update);
+
+					let data = Json::Object(attrs);
+					// TODO: lazy (asJson) encoding?
 					let data = try!(json::encode(&data));
 					//try!(write_sse_part(response, "event", &"state"));
 					try!(write_sse(response, "data", &data));
 				},
+
 				_ = timer.recv() => {
 					try!(write_sse_keepalive(response));
 				}
@@ -107,7 +132,13 @@ impl Handler for Server {
 	}
 }
 
-pub fn main(monitor: SystemMonitor) {
+pub fn main(monitor: SystemMonitor) -> Result<(),InternalError> {
 	let server = Server { monitor: Mutex::new(Box::new(monitor)), };
-	hyper::Server::http(server).listen("127.0.0.1:3000").unwrap();
+	match hyper::Server::http(server).listen("127.0.0.1:3000") {
+		Ok(_) => {
+			info!("Server listening on port 3000");
+			Ok(())
+		},
+		Err(e) => Err(InternalError::new(format!("Server failed to start: {}", e))),
+	}
 }
