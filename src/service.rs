@@ -50,7 +50,7 @@ impl Server {
 
 		let mut last_state = None;
 		loop {
-			let timer = schedule_recv::oneshot_ms(1500);
+			let timer = schedule_recv::oneshot_ms(10000);
 			select!(
 				data = receiver.recv() => {
 					let data = try!(data);
