@@ -29,11 +29,17 @@ mod service;
 pub use monitor::*;
 pub use system_monitor::*;
 use systemd::*;
+use std::sync::{Arc,Mutex};
 
 fn main () {
 	env_logger::init().unwrap();
-	let mut monitor = SystemMonitor::new(20000);
-	monitor.add(String::from_str("systemd.system"), Box::new(SystemdMonitor::system())).unwrap();
-	monitor.add(String::from_str("systemd.user"), Box::new(SystemdMonitor::user())).unwrap();
+	let systemd_system = SystemdMonitor::system("systemd.system".to_string());
+	let systemd_user = SystemdMonitor::user("systemd.user".to_string());
+	let monitor = SystemMonitor::new(
+		20000,
+		50,
+		vec!(systemd_system.poller(), systemd_user.poller()),
+		vec!(systemd_system.pusher(), systemd_user.pusher())
+	).unwrap();
 	service::main(monitor).unwrap();
 }

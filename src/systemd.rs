@@ -11,11 +11,6 @@ use rustc_serialize::json::{Json};
 use chrono::{DateTime,Local};
 use monitor::*;
 
-pub struct SystemdMonitor {
-	ignored_types: HashSet<String>,
-	user: bool,
-}
-
 fn read_all(source: &mut io::Read) -> Result<String, InternalError> {
 	let mut buf = Vec::new();
 	try!(source.read_to_end(&mut buf));
@@ -38,8 +33,26 @@ impl convert::From<RuntimeError> for InternalError {
 	}
 }
 
+pub struct SystemdMonitor {
+	ignored_types: HashSet<String>,
+	user: bool,
+	id: String,
+}
+
+pub struct SystemdPoller {
+	ignored_types: HashSet<String>,
+	user: bool,
+	id: String,
+}
+
+pub struct SystemdPusher {
+	ignored_types: HashSet<String>,
+	user: bool,
+	id: String,
+}
+
 impl SystemdMonitor {
-	fn new(user: bool) -> SystemdMonitor {
+	fn new(id: String, user: bool) -> SystemdMonitor {
 		let mut ignored = HashSet::new();
 		// XXX make configurable
 		ignored.insert(String::from_str("device"));
@@ -48,19 +61,38 @@ impl SystemdMonitor {
 		ignored.insert(String::from_str("machine"));
 		ignored.insert(String::from_str("mount"));
 		SystemdMonitor {
-			ignored_types: ignored,
+			id: id,
 			user: user,
+			ignored_types: ignored,
 		}
 	}
 
-	pub fn system() -> SystemdMonitor {
-		Self::new(false)
+	pub fn system(id: String) -> SystemdMonitor {
+		Self::new(id, false)
 	}
 
-	pub fn user() -> SystemdMonitor {
-		Self::new(true)
+	pub fn user(id: String) -> SystemdMonitor {
+		Self::new(id, true)
 	}
 
+	pub fn poller(&self) -> Box<SystemdPoller> {
+		Box::new(SystemdPoller {
+			ignored_types: self.ignored_types.clone(),
+			user: self.user,
+			id: self.id.clone(),
+		})
+	}
+
+	pub fn pusher(&self) -> Box<SystemdPusher> {
+		Box::new(SystemdPusher {
+			ignored_types: self.ignored_types.clone(),
+			user: self.user,
+			id: self.id.clone(),
+		})
+	}
+}
+
+impl SystemdPoller {
 	fn common_args<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
 		if self.user {
 			cmd.arg("--user")
@@ -286,12 +318,26 @@ impl SystemdMonitor {
 	}
 }
 
-impl Monitor for SystemdMonitor {
+const SYSTEMD_ID : &'static str = "systemd";
+
+impl PullDataSource for SystemdPoller {
 	fn typ(&self) -> String {
-		return String::from_str("systemd");
+		return String::from_str(SYSTEMD_ID);
 	}
-	fn scan(&self) -> Result<HashMap<String, Status>, InternalError> {
+	fn id(&self) -> String {
+		self.id.clone()
+	}
+	fn poll(&self) -> Result<Data, InternalError> {
 		let mut child = try!(self.spawn());
-		self.parse(&mut child)
+		let state = try!(self.parse(&mut child));
+		Ok(Data::State(state))
+	}
+}
+
+impl PushDataSource for SystemdPusher {
+	fn subscribe(&mut self, _receiver: mpsc::SyncSender<Arc<Update>>) -> Result<(), InternalError> {
+		warn!("unimplemented");
+		Ok(())
+		//unimplemented!()
 	}
 }

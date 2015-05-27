@@ -3,10 +3,10 @@ extern crate hyper;
 use std::io;
 use std::io::{Write};
 use std::collections::BTreeMap;
-use std::sync::{Mutex};
+use std::sync::{Arc,Mutex};
 
-use monitor::InternalError;
-use system_monitor::SystemMonitor;
+use monitor::{InternalError,Update};
+use system_monitor::{SystemMonitor,Receiver};
 use hyper::server::{Request,Response,Handler};
 use hyper::net::{Fresh,Streaming};
 use hyper::header;
@@ -56,7 +56,7 @@ impl Server {
 					let data = try!(data);
 					let json = data.to_json();
 					let mut attrs = BTreeMap::new();
-					attrs.insert(String::from_str("type"), "state".to_json());
+					attrs.insert(String::from_str("type"), "update".to_json());
 					let overlay = String::from_str("overlay");
 					//let next_state = Some(json.clone());
 					let (next_state, update) = match last_state {

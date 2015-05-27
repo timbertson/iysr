@@ -7,50 +7,13 @@ use std::sync::mpsc;
 use std::sync::{Arc,Mutex};
 use std::thread;
 use std::fmt;
+use std::mem;
+use std::error::Error;
 use std::ops::Deref;
 use monitor::*;
 use rustc_serialize::{Encoder,Encodable};
 use rustc_serialize::json;
 use rustc_serialize::json::{Json,ToJson};
-use chrono::Timelike;
-
-
-pub struct Time(DateTime<UTC>);
-impl Time {
-	fn timestamp(&self) -> i64 {
-		let Time(t) = *self;
-		t.timestamp()
-	}
-	fn time(&self) -> chrono::NaiveTime {
-		let Time(t) = *self;
-		t.time()
-	}
-}
-impl fmt::Debug for Time {
-	fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-		let Time(t) = *self;
-		t.fmt(f)
-	}
-}
-
-//impl Encodable for Time {
-//	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
-//		encoder.emit_struct("Time", 2, |encoder| {
-//			try!(encoder.emit_struct_field("sec", 0usize, |e| self.timestamp().encode(e)));
-//			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000000).encode(e)));
-//			Ok(())
-//		})
-//	}
-//}
-
-impl ToJson for Time {
-	fn to_json(&self) -> Json {
-		let mut attrs = BTreeMap::new();
-		attrs.insert(String::from_str("sec"), Json::I64(self.timestamp()));
-		attrs.insert(String::from_str("ms"), Json::U64((self.time().nanosecond() / 1000000) as u64));
-		Json::Object(attrs)
-	}
-}
 
 impl ToJson for SourceStatus {
 	fn to_json(&self) -> Json {
@@ -74,69 +37,28 @@ pub struct SourceStatus {
 	status: Result<HashMap<String, Status>, InternalError>,
 }
 
-#[derive(Debug)]
-pub struct SystemState {
-	pub time: Time,
-	pub sources: HashMap<String, SourceStatus>,
-}
-type Listeners = HashMap<u32, mpsc::SyncSender<Arc<SystemState>>>;
+type Listeners = HashMap<u32, mpsc::SyncSender<Arc<Update>>>;
 
-//impl Encodable for SystemState {
-//	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
-//		encoder.emit_struct("SystemState", 2, |encoder| {
-//			try!(encoder.emit_struct_field("time", 0usize, |e| self.time.encode(e)));
-//			try!(encoder.emit_struct_field("type", 1usize, |e| "system".encode(e)));
-//			try!(encoder.emit_struct_field("sources", 2usize, |encoder| {
-//				try!(encoder.emit_map(self.sources.len(), |encoder| {
-//					use monitor::Monitor;
-//					let mut idx = 0usize;
-//					for (key, source) in self.sources.iter() {
-//						try!(encoder.emit_map_elt_key(idx, |e| key.encode(e)));
-//						try!(encoder.emit_map_elt_val(idx, |encoder| {
-//							try!(encoder.emit_struct("Result", 2usize, |encoder| {
-//								match source.status {
-//									Ok(ref v) => {
-//										try!(encoder.emit_struct_field("ok", 0usize, |e| v.encode(e)));
-//									},
-//									Err(ref v) => {
-//										try!(encoder.emit_struct_field("err", 0usize, |e| v.encode(e)));
-//									},
-//								};
-//								try!(encoder.emit_struct_field("type", 1usize, |e| source.typ.encode(e)));
-//								Ok(())
-//							}));
-//							Ok(())
-//						}));
-//						idx += 1;
-//					}
-//					Ok(())
-//				}));
-//				Ok(())
-//			}));
-//			Ok(())
-//		})
-//	}
-//}
-
-impl ToJson for SystemState {
-	fn to_json(&self) -> Json {
-		let mut root = BTreeMap::new();
-		root.insert(String::from_str("time"), self.time.to_json());
-		root.insert(String::from_str("type"), Json::String(String::from_str("system")));
-		root.insert(String::from_str("sources"), self.sources.to_json());
-		Json::Object(root)
-	}
+macro_rules! log_error {
+	($e:expr, $m:expr) => (
+		warn!("SystemMonitor ignoring error {}: {:?}", $m, $e)
+	)
 }
 
-
-struct SharedState {
-	monitors: HashMap<String, Arc<Box<Monitor>>>,
-	last_state: Option<Arc<SystemState>>,
+macro_rules! ignore_error {
+	($r:expr, $m:expr) => (
+		match $r {
+			Ok(()) => (),
+			Err(e) => log_error!(e, $m),
+		}
+	)
 }
+
+type SharedRef<T> = Arc<Mutex<T>>;
 
 pub struct Receiver<T> {
 	inner: mpsc::Receiver<T>,
-	collection: Arc<Mutex<Listeners>>,
+	collection: SharedRef<Listeners>,
 	id: u32,
 }
 
@@ -173,109 +95,146 @@ impl<T> Drop for Receiver<T> {
 	}
 }
 
+enum ThreadState {
+	NotRunning(mpsc::Receiver<Arc<Update>>, Vec<Box<PullDataSource>>),
+	Running(thread::JoinHandle<Result<(),InternalError>>, thread::JoinHandle<()>),
+	Ended,
+}
+
+impl ThreadState {
+	fn _take(&mut self) -> ThreadState {
+		// atomically swap out this value for `ended` (temporarily, used by `map`)
+		mem::replace(self, ThreadState::Ended)
+	}
+
+	fn bind<F>(&mut self, f: F) -> ()
+		where F: FnOnce(ThreadState) -> ThreadState
+	{
+		*self = f(self._take());
+	}
+
+	fn try_bind<F, E:Sized>(&mut self, f: F) -> Result<(), E>
+		where F: FnOnce(ThreadState) -> Result<ThreadState,E>
+	{
+		let new = try!(f(self._take()));
+		*self = new;
+		Ok(())
+	}
+}
+
 pub struct SystemMonitor {
 	poll_time_ms: u32,
-	thread: Option<thread::JoinHandle<()>>,
-	shared: Arc<Mutex<SharedState>>,
-	listeners: Arc<Mutex<Listeners>>,
+	thread_state: ThreadState,
+	event_writable: mpsc::SyncSender<Arc<Update>>,
+	listeners: SharedRef<Listeners>,
+	push_sources: Vec<Box<PushDataSource>>,
+	last_state: SharedRef<Option<Vec<Arc<Update>>>>,
 	subscriber_id: u32,
 }
 
 impl Drop for SystemMonitor {
 	fn drop(&mut self) {
-		match self.thread.take() {
-			None => (),
-			Some(t) => {
-				match t.join() {
-					Ok(_) => (),
-					Err(e) => debug!("failed to join SystemMonitor thread: {:?}",e),
-				}
-			}
-		}
+		self.thread_state.bind(|state| match state {
+			ThreadState::Running(t1, t2) => {
+				match t1.join() {
+					Ok(Ok(())) => (),
+					Err(e) => log_error!(e, "joining thread"),
+					Ok(Err(e)) => log_error!(e, "joining thread"),
+				};
+				ignore_error!(t2.join(), "joining thread");
+				ThreadState::Ended
+			},
+			r@ThreadState::NotRunning(_,_) | r@ThreadState::Ended => r,
+		});
 	}
 }
 
 impl SystemMonitor {
-	pub fn new(poll_time:u32) -> SystemMonitor {
-		let shared_state = SharedState {
-			monitors: HashMap::new(),
-			last_state: None,
-		};
-		SystemMonitor {
+	pub fn new(
+		poll_time:u32,
+		event_buffer:usize,
+		pull_sources: Vec<Box<PullDataSource>>,
+		push_sources: Vec<Box<PushDataSource>>,
+	) -> Result<SystemMonitor, InternalError> {
+		let (w,r) = mpsc::sync_channel(event_buffer);
+		Ok(SystemMonitor {
 			poll_time_ms: poll_time,
-			// XXX can we remove these ARCs?
-			shared: Arc::new(Mutex::new(shared_state)),
+			// XXX can we remove these ARCs? They could at least be Boxes, I think
 			listeners: Arc::new(Mutex::new(HashMap::new())),
-			thread: None,
+			push_sources: push_sources,
+			last_state: Arc::new(Mutex::new(None)),
+			event_writable: w,
+			thread_state: ThreadState::NotRunning(r, pull_sources),
 			subscriber_id: 0,
-		}
+		})
 	}
 
-	pub fn add(&mut self, key: String, monitor: Box<Monitor>) -> Result<(), InternalError> {
-		let mut shared = self.shared.lock().unwrap();
-		// XXX shouldn't need clone?
-		match shared.monitors.entry(key.clone()) {
-			Entry::Vacant(entry) => {
-				entry.insert(Arc::new(monitor));
-				Ok(())
-			},
-			Entry::Occupied(_) => {
-				Err(InternalError::new(format!("Multiple monitors with key {}", key)))
-			},
-		}
-	}
-
-	fn run_loop(sleep_ms: u32, shared: Arc<Mutex<SharedState>>, listeners: Arc<Mutex<Listeners>>) {
+	fn poll_loop(
+			sleep_ms: u32,
+			pull_sources: Vec<Box<PullDataSource>>,
+			last_state: SharedRef<Option<Vec<Arc<Update>>>>,
+			event_writable: mpsc::SyncSender<Arc<Update>>)
+	{
 		// XXX stop loop when last listener deregisters
 		loop {
-			let time = Time(UTC::now());
-			let mut sources = HashMap::new();
-			let monitors = {
-				let shared = shared.lock().unwrap();
-				shared.monitors.clone()
-			};
-			for (name, monitor) in monitors.iter() {
+			let mut state = Vec::with_capacity(pull_sources.len());
+			for source in pull_sources.iter() {
 				// XXX can we not clone this?
-				sources.insert(name.clone(), SourceStatus {
-					typ: monitor.typ(),
-					status: monitor.scan()
+				let time = Time::now();
+				let typ = source.typ();
+				let id = source.id();
+				let data = match source.poll() {
+					Ok(data) => data,
+					Err(e) => Data::Error(InternalError::from(e)),
+				};
+				let data = Arc::new(Update {
+					time: time,
+					source: id,
+					typ: typ,
+					data: data,
 				});
-			}
-
-			let state = Arc::new(SystemState {
-				time: time,
-				sources: sources,
-			});
-			{
-				let listeners = listeners.lock().unwrap();
-				for listener in listeners.values() {
-					match listener.try_send(state.clone()) {
-						Ok(()) => (),
-						Err(e) => {
-							debug!("SystemState try_send error (ignoring): {}",e)
-						},
-					}
-				}
+				ignore_error!(event_writable.try_send(data.clone()), "sending poll result");
+				state.push(data);
 			}
 			{
-				let mut shared = shared.lock().unwrap();
-				shared.last_state = Some(state);
+				let mut last_state = last_state.lock().unwrap();
+				*last_state = Some(state);
 			};
 			thread::sleep_ms(sleep_ms);
 		}
 	}
 
-	pub fn subscribe(&mut self) -> Result<Receiver<Arc<SystemState>>, InternalError> {
-		let (sender, receiver) = mpsc::sync_channel(1);
-		{
-			let shared = self.shared.lock().unwrap();
-			match shared.last_state {
-				None => (),
-				Some(ref state) => {
-					let _:Result<(), mpsc::TrySendError<_>> = sender.try_send(state.clone());
+	fn run_loop(
+			event_readable: mpsc::Receiver<Arc<Update>>,
+			listeners: SharedRef<Listeners>) -> Result<(), InternalError>
+	{
+		// XXX stop loop when last listener deregisters
+		loop {
+			let data : Arc<Update> = try!(event_readable.recv());
+			{
+				let listeners = listeners.lock().unwrap();
+				for listener in listeners.values() {
+					ignore_error!(listener.try_send(data.clone()), "sending data to listener");
 				}
 			}
 		}
+	}
+
+	pub fn subscribe(&mut self) -> Result<Receiver<Arc<Update>>, InternalError> {
+		let (sender, receiver) = mpsc::sync_channel(1);
+		let last_state = {
+			match *self.last_state.lock().unwrap() {
+				None => None,
+				Some(ref state) => Some(state.clone()),
+			}
+		};
+		match last_state {
+			None => (),
+			Some(state) =>
+				for update in state.iter() {
+					ignore_error!(sender.try_send(update.clone()), "sending initial state");
+				}
+		};
 		let mut id;
 		{
 			let mut listeners = self.listeners.lock().unwrap();
@@ -303,19 +262,37 @@ impl SystemMonitor {
 			collection: self.listeners.clone(),
 			id: id,
 		};
-		match self.thread {
-			Some(_) => (),
-			None => {
+
+		// we need to make local references here, because
+		// we can't use `self` in the closure below while
+		// self.thread_state is mutably borrowed
+		let last_state = &self.last_state;
+		let push_sources = &mut self.push_sources;
+		let listeners = &self.listeners;
+		let event_writable = &self.event_writable;
+		let sleep_ms = self.poll_time_ms;
+
+		try!(self.thread_state.try_bind(|state| match state {
+			r@ThreadState::Running(_,_) => Ok(r),
+			ThreadState::Ended => Err(InternalError::new("cannot subscribe monitor, it has already ended".to_string())),
+			ThreadState::NotRunning(event_readable, pull_sources) => {
 				debug!("Starting system monitor thread");
-				let shared : Arc<Mutex<SharedState>> = self.shared.clone();;
-				let listeners : Arc<Mutex<Listeners>> = self.listeners.clone();;
-				let sleep_ms = self.poll_time_ms;
-				let thread = try!(thread::Builder::new().spawn(move ||
-					Self::run_loop(sleep_ms, shared, listeners)
+				for source in push_sources.iter_mut() {
+					try!(source.subscribe(event_writable.clone()));
+				}
+				let event_writable = event_writable.clone();
+				let listeners = listeners.clone();
+				let last_state = last_state.clone();
+				//let pull_sources : Vec<Box<PullDataSource>> = pull_sources.clone();
+				let poll_thread = try!(thread::Builder::new().spawn(move ||
+					Self::poll_loop(sleep_ms, pull_sources, last_state, event_writable)
 				));
-				self.thread = Some(thread);
+				let event_thread = try!(thread::Builder::new().spawn(move ||
+					Self::run_loop(event_readable, listeners.clone())
+				));
+				Ok(ThreadState::Running(event_thread, poll_thread))
 			}
-		}
+		}));
 		Ok(rv)
 	}
 }
