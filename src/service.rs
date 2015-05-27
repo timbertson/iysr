@@ -21,7 +21,7 @@ struct Server {
 
 fn _write_sse(dest: &mut io::Write, prefix: &str, data: &str, end: bool) -> io::Result<()> {
 	for line in data.lines() {
-		debug!("writing line: {}", line);
+		trace!("writing line: {}", line);
 		try!(write!(dest, "{}: {}\n", prefix, line));
 	}
 	if end {
@@ -56,7 +56,7 @@ impl Server {
 					let data = try!(data);
 					let json = data.to_json();
 					let mut attrs = BTreeMap::new();
-					attrs.insert(String::from_str("type"), "update".to_json());
+					attrs.insert(String::from_str("key"), "TODO_UNIQUE_KEY".to_json());
 					let overlay = String::from_str("overlay");
 					//let next_state = Some(json.clone());
 					let (next_state, update) = match last_state {

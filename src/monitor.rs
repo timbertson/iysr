@@ -215,6 +215,7 @@ impl ToJson for Time {
 	}
 }
 
+#[derive(Debug)]
 pub struct Update {
 	pub source: String,
 	pub typ: String,

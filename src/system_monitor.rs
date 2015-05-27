@@ -221,7 +221,8 @@ impl SystemMonitor {
 	}
 
 	pub fn subscribe(&mut self) -> Result<Receiver<Arc<Update>>, InternalError> {
-		let (sender, receiver) = mpsc::sync_channel(1);
+		// XXX make this react to self.pull_sources.len()
+		let (sender, receiver) = mpsc::sync_channel(10);
 		let last_state = {
 			match *self.last_state.lock().unwrap() {
 				None => None,
@@ -230,10 +231,12 @@ impl SystemMonitor {
 		};
 		match last_state {
 			None => (),
-			Some(state) =>
+			Some(state) => {
+				debug!("sending {} initial updates from last_state", state.len());
 				for update in state.iter() {
 					ignore_error!(sender.try_send(update.clone()), "sending initial state");
 				}
+			}
 		};
 		let mut id;
 		{
