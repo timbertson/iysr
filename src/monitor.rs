@@ -150,7 +150,15 @@ pub trait Monitor: Send + Sync {
 pub enum Data {
 	State(HashMap<String, Status>),
 	Event(Event),
-	Error(InternalError),
+	Error(Failure),
+}
+
+#[derive(Debug,ToJson)]
+pub struct Failure {
+	// For ongoing / recurring errors, we use the same ID so that the UI can roll them up.
+	// Ephemeral errors don't need an ID.
+	pub id: Option<String>,
+	pub error: String,
 }
 
 impl ToJson for Data {

@@ -185,7 +185,10 @@ impl SystemMonitor {
 				let id = source.id();
 				let data = match source.poll() {
 					Ok(data) => data,
-					Err(e) => Data::Error(InternalError::from(e)),
+					Err(e) => Data::Error(Failure {
+						error: format!("{}", e),
+						id: Some("poll".to_string()),
+					}),
 				};
 				let data = Arc::new(Update {
 					time: time,
