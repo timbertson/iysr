@@ -69,6 +69,69 @@ pub struct Event {
 	pub attrs: Arc<Attributes>,
 }
 
+#[derive(Debug)]
+pub enum GaugeValue {
+	Absolute(i32),
+	Difference(i32),
+}
+
+#[derive(Debug)]
+pub enum MetricValue {
+	Counter(i32),
+	Gauge(GaugeValue),
+	Timespan(Duration),
+}
+
+#[derive(Debug)]
+pub struct Metric {
+	pub id: String,
+	pub value: MetricValue,
+}
+
+#[derive(Debug)]
+pub enum ComputedMetricValue {
+	Int(i64),
+	Float(f64),
+	Duration(Duration),
+}
+
+impl ToJson for ComputedMetricValue {
+	fn to_json(&self) -> Json {
+		match *self {
+			ComputedMetricValue::Int(ref n) => n.to_json(),
+			ComputedMetricValue::Float(ref n) => n.to_json(),
+			ComputedMetricValue::Duration(ref n) => n.to_json(),
+		}
+	}
+}
+
+#[derive(Debug)]
+pub struct Duration(chrono::Duration);
+
+impl ToJson for Duration {
+	fn to_json(&self) -> Json {
+		let mut attrs = BTreeMap::new();
+		match *self {
+			Duration(d) => {
+				attrs.insert(String::from_str("ms"), Json::I64(d.num_milliseconds()));
+			}
+		}
+		Json::Object(attrs)
+	}
+}
+
+#[derive(Debug,ToJson)]
+pub struct ComputedMetric {
+	pub id: String,
+	pub value: ComputedMetricValue,
+}
+
+#[derive(Debug,ToJson)]
+pub struct Metrics {
+	values: Vec<ComputedMetric>,
+	span: Duration,
+}
+
 #[derive(Debug, RustcEncodable)]
 pub struct InternalError {
 	pub reason: String,
@@ -150,6 +213,7 @@ pub trait Monitor: Send + Sync {
 pub enum Data {
 	State(HashMap<String, Status>),
 	Event(Event),
+	Metrics(Metrics),
 	Error(Failure),
 }
 
@@ -163,21 +227,15 @@ pub struct Failure {
 
 impl ToJson for Data {
 	fn to_json(&self) -> Json {
+		let (key, val) = match *self {
+			Data::State(ref x) => ("State", x.to_json()),
+			Data::Event(ref x) => ("Event", x.to_json()),
+			Data::Metrics(ref x) => ("Metrics", x.to_json()),
+			Data::Error(ref x) => ("Error", x.to_json()),
+		};
 		let mut pair = Vec::new();
-		match *self {
-			Data::State(ref x) => {
-				pair.push("State".to_json());
-				pair.push(x.to_json());
-			},
-			Data::Event(ref x) => {
-				pair.push("Event".to_json());
-				pair.push(x.to_json());
-			},
-			Data::Error(ref x) => {
-				pair.push("Error".to_json());
-				pair.push(x.to_json());
-			},
-		}
+		pair.push(key.to_json());
+		pair.push(val);
 		Json::Array(pair)
 	}
 }
