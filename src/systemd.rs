@@ -10,12 +10,7 @@ use std::io::{BufRead, BufReader};
 use rustc_serialize::json::{Json};
 use chrono::{DateTime,Local};
 use monitor::*;
-
-fn read_all(source: &mut io::Read) -> Result<String, InternalError> {
-	let mut buf = Vec::new();
-	try!(source.read_to_end(&mut buf));
-	Ok(try!(String::from_utf8(buf)))
-}
+use util::read_all;
 
 const MAX_EXECV_ARGLEN : usize = 4096; // conservative, actually much higher on most linux systems
 

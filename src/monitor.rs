@@ -63,9 +63,9 @@ pub struct Status {
 
 #[derive(Debug,ToJson)]
 pub struct Event {
-	pub id: String,
+	pub id: Option<String>,
 	pub severity: Option<Severity>,
-	pub content: String,
+	pub message: Option<String>,
 	pub attrs: Arc<Attributes>,
 }
 

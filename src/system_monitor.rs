@@ -39,21 +39,6 @@ pub struct SourceStatus {
 
 type Listeners = HashMap<u32, mpsc::SyncSender<Arc<Update>>>;
 
-macro_rules! log_error {
-	($e:expr, $m:expr) => (
-		warn!("SystemMonitor ignoring error {}: {:?}", $m, $e)
-	)
-}
-
-macro_rules! ignore_error {
-	($r:expr, $m:expr) => (
-		match $r {
-			Ok(()) => (),
-			Err(e) => log_error!(e, $m),
-		}
-	)
-}
-
 type SharedRef<T> = Arc<Mutex<T>>;
 
 pub struct Receiver<T> {
