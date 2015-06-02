@@ -19,12 +19,7 @@ type JsonMap = BTreeMap<String,Json>;
 // TODO: there are a bunch of `clone` calls here that wouldn't be necessary with
 // cleverer use of references
 
-fn mandatory_key(key: &'static str, attrs: &mut ConfigMap) -> Result<Json, ConfigError> {
-	attrs.remove(key).ok_or(ConfigError::missing_key(key))
-}
-
-// XXX is this required?
-macro_rules! ann {
+macro_rules! annotate_error {
 	($key: expr, $x: expr) => {
 		match $x {
 			rv@Ok(_) => rv,
@@ -33,12 +28,6 @@ macro_rules! ann {
 				Err(e)
 			},
 		}
-	}
-}
-
-macro_rules! mandatory_key {
-	($a: expr, $b: expr) => {
-		try!(mandatory_key($a, $b))
 	}
 }
 
@@ -87,21 +76,6 @@ fn as_i32(v: &Json) -> Result<i32, ConfigError> {
 	}
 }
 
-macro_rules! as_string {
-	($x: expr) => {
-		try!(as_string($x))
-	}
-}
-
-macro_rules! try_opt {
-	($x: expr) => {
-		match $x {
-			None => None,
-			Some(rv) => Some(try!(rv)),
-		}
-	}
-}
-
 fn as_object(j:&Json) -> Result<JsonMap, ConfigError> {
 	match *j {
 		Json::Object(ref attrs) => Ok(attrs.clone()),
@@ -126,17 +100,6 @@ fn as_array(j:&Json) -> Result<Vec<Json>, ConfigError> {
 
 
 // XXX these impls are very repetitive
-trait AnnotatedDescentMut {
-	type Inner;
-	fn descend_mut<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut Self::Inner>) -> Result<R,ConfigError>;
-}
-trait AnnotatedDescent {
-	type Inner;
-	fn descend<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Self::Inner>) -> Result<R,ConfigError>;
-}
-
 trait AnnotatedDescentJsonIter {
 	type Inner;
 	fn descend_map_json<F,R>(&self, f: F) -> Result<Vec<R>,ConfigError>
@@ -149,19 +112,12 @@ trait AnnotatedDescentJson {
 }
 
 // XXX make this AnnotatedDescentJson
-impl AnnotatedDescent for JsonMap {
-	type Inner = Json;
-	fn descend<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
+impl AnnotatedDescentJson for JsonMap {
+	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
 		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
 	{
 		let val = self.remove(key);
-		match f(val.as_ref()) {
-			rv@Ok(_) => rv,
-			Err(mut e) => {
-				e.annotate(key.to_string());
-				Err(e)
-			},
-		}
+		annotate_error!(key, f(val.as_ref()))
 	}
 }
 
@@ -173,24 +129,8 @@ impl AnnotatedDescentJsonIter for Json {
 		let arr = try!(as_array(self));
 		arr.iter().enumerate().map_m(|pair| {
 			let (idx, entry) = *pair;
-			ann!(idx, f(entry))
+			annotate_error!(idx, f(entry))
 		})
-	}
-}
-
-impl AnnotatedDescentMut for JsonMap {
-	type Inner = Json;
-	fn descend_mut<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut Json>) -> Result<R,ConfigError>
-	{
-		let mut val = self.remove(key);
-		match f(val.as_mut()) {
-			rv@Ok(_) => rv,
-			Err(mut e) => {
-				e.annotate(key.to_string());
-				Err(e)
-			},
-		}
 	}
 }
 
@@ -200,7 +140,7 @@ impl<'a, T:AnnotatedDescentJson> AnnotatedDescentJson for Option<&'a mut T> {
 	{
 		match *self {
 			Some(ref mut inner) => inner.descend_json(key, f),
-			None => ann!(key, f(None)),
+			None => annotate_error!(key, f(None)),
 		}
 	}
 }
@@ -208,36 +148,32 @@ impl<'a, T:AnnotatedDescentJson> AnnotatedDescentJson for Option<&'a mut T> {
 #[derive(Debug)]
 struct ConfigMap(BTreeMap<String,Json>);
 impl ConfigMap {
-	fn descend_json_mut<F,R>(&mut self, key: &'static str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut Json>) -> Result<R,ConfigError>
-	{
-		let mut val = self.remove(key);
-		match f(val.as_mut()) {
-			rv@Ok(_) => rv,
-			Err(mut e) => {
-				e.annotate(key.to_string());
-				Err(e)
-			},
+	fn _remove(&mut self, key:&str) -> Option<Json> {
+		self._deref().remove(key)
+	}
+
+	fn _deref<'a>(&'a mut self) -> &'a mut JsonMap {
+		match *self {
+			ConfigMap(ref mut attrs) => attrs
 		}
 	}
 
-}
-impl AnnotatedDescentMut for ConfigMap {
-	type Inner = ConfigMap;
-	fn descend_mut<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut Self::Inner>) -> Result<R,ConfigError>
+	fn descend_json_mut<F,R>(&mut self, key: &'static str, f: F) -> Result<R,ConfigError>
+		where F: FnOnce(Option<&mut Json>) -> Result<R,ConfigError>
 	{
-		match
-			self.remove(key)
+		annotate_error!(key,
+			f(self._remove(key).as_mut())
+		)
+	}
+
+	fn consume<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
+		where F: FnOnce(Option<&mut ConfigMap>) -> Result<R,ConfigError>
+	{
+		annotate_error!(key,
+			self._remove(key)
 			.map_m(as_config)
 			.and_then(|conf| ConfigCheck::consume_opt(conf, f))
-		{
-			rv@Ok(_) => rv,
-			Err(mut e) => {
-				e.annotate(key.to_string());
-				Err(e)
-			},
-		}
+		)
 	}
 }
 
@@ -245,14 +181,7 @@ impl AnnotatedDescentJson for ConfigMap {
 	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
 		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
 	{
-		let val = self.remove(key);
-		match f(val.as_ref()) {
-			rv@Ok(_) => rv,
-			Err(mut e) => {
-				e.annotate(key.to_string());
-				Err(e)
-			},
-		}
+		annotate_error!(key, f(self._remove(key).as_ref()))
 	}
 }
 
@@ -530,21 +459,21 @@ struct ConfigCheck {
 
 
 // XXX should we actually implement this?
-impl Deref for ConfigMap {
-	type Target = JsonMap;
-	fn deref<'a>(&'a self) -> &'a Self::Target {
-		match *self {
-			ConfigMap(ref attrs) => attrs
-		}
-	}
-}
-impl DerefMut for ConfigMap {
-	fn deref_mut<'a>(&'a mut self) -> &'a mut Self::Target {
-		match *self {
-			ConfigMap(ref mut attrs) => attrs
-		}
-	}
-}
+//impl Deref for ConfigMap {
+//	type Target = JsonMap;
+//	fn deref<'a>(&'a self) -> &'a Self::Target {
+//		match *self {
+//			ConfigMap(ref attrs) => attrs
+//		}
+//	}
+//}
+//impl DerefMut for ConfigMap {
+//	fn deref_mut<'a>(&'a mut self) -> &'a mut Self::Target {
+//		match *self {
+//			ConfigMap(ref mut attrs) => attrs
+//		}
+//	}
+//}
 
 impl ConfigCheck {
 	fn new(attrs: JsonMap) -> ConfigCheck {
@@ -567,10 +496,11 @@ impl ConfigCheck {
 		let rv = f(&mut slf.attrs);
 
 		slf.checked = true;
-		let consumed = if slf.attrs.is_empty() {
+		let attrs = slf.attrs._deref();
+		let consumed = if attrs.is_empty() {
 			Ok(())
 		} else {
-			let keys : Vec<String> = slf.attrs.keys().cloned().collect();
+			let keys : Vec<String> = attrs.keys().cloned().collect();
 			Err(ConfigError::new(format!(
 				"Unused config key(s): {}", keys.as_slice().connect(", ")
 			)))
@@ -632,7 +562,7 @@ impl ModuleConfig for JournalConfig {
 		let level = try!(config.descend_json("level", |l|
 			l.map_m(|l| as_string(l).and_then(parse_severity))));
 
-		let attr_extend = try!(config.descend("attr_extend", |a|
+		let attr_extend = try!(config.descend_json("attr_extend", |a|
 			a.map_m(|a| as_object(a.clone()))));
 
 		Ok(JournalFilter {
@@ -690,7 +620,7 @@ fn parse_source_config(id: &String, conf: Json) -> Result<SourceConfig, ConfigEr
 	let (module, conf) = match conf {
 		Json::Boolean(true) => (None, None),
 		Json::Object(mut attrs) => {
-			let module = try!(attrs.descend("module", as_string_opt));
+			let module = try!(attrs.descend_json("module", as_string_opt));
 			(module, Some(ConfigCheck::new(attrs)))
 		},
 		ref other => {
@@ -768,38 +698,35 @@ impl PollConfig {
 
 	fn default_interval() -> Duration { Duration::seconds(15) }
 
-	fn parse(c:&Json) -> Result<PollConfig, ConfigError> {
-		let c = try!(as_config(c));
-		ConfigCheck::consume(c, |c| {
-			let invalid_duration = |d:&String|
-				ConfigError::new(format!("Invalid duration: {}", d));
+	fn parse(c:&mut ConfigMap) -> Result<PollConfig, ConfigError> {
+		let invalid_duration = |d:&String|
+			ConfigError::new(format!("Invalid duration: {}", d));
 
-			let duration = try!(c.descend_json("interval", |s | match s {
-				Some(s) => {
-					let s = try!(as_string(s));
-					let suffix_loc = try!(
-						s.find(|c:char| !c.is_numeric())
-						.ok_or_else(||invalid_duration(&s))
-					);
-					let digits = s.index(0..suffix_loc);
-					let suffix = s.index(suffix_loc..);
-					let val = try!(i64::from_str(digits));
-					Ok(match suffix {
-						"ms" => Duration::milliseconds(val),
-						"s" => Duration::seconds(val),
-						"m" => Duration::minutes(val),
-						"h" => Duration::hours(val),
-						"d" => Duration::days(val),
-						_ => {
-							return Err(invalid_duration(&s));
-						}
-					})
-				},
-				None => Ok(Self::default_interval()),
-			}));
-			Ok(PollConfig {
-				interval: duration,
-			})
+		let duration = try!(c.descend_json("interval", |s | match s {
+			Some(s) => {
+				let s = try!(as_string(s));
+				let suffix_loc = try!(
+					s.find(|c:char| !c.is_numeric())
+					.ok_or_else(||invalid_duration(&s))
+				);
+				let digits = s.index(0..suffix_loc);
+				let suffix = s.index(suffix_loc..);
+				let val = try!(i64::from_str(digits));
+				Ok(match suffix {
+					"ms" => Duration::milliseconds(val),
+					"s" => Duration::seconds(val),
+					"m" => Duration::minutes(val),
+					"h" => Duration::hours(val),
+					"d" => Duration::days(val),
+					_ => {
+						return Err(invalid_duration(&s));
+					}
+				})
+			},
+			None => Ok(Self::default_interval()),
+		}));
+		Ok(PollConfig {
+			interval: duration,
 		})
 	}
 }
@@ -818,16 +745,18 @@ impl Config {
 	pub fn parse(config:Json) -> Result<Config, ConfigError> {
 		let config = try!(as_config(&config));
 		ConfigCheck::consume(config, |config| {
-			let poll = try!(config.descend("poll", |p| match p {
+			let poll = try!(config.consume("poll", |p| match p {
 				None => Ok(PollConfig::default()),
-				Some(c) => PollConfig::parse(&c),
+				Some(c) => PollConfig::parse(c),
 			}));
 			let sources = try!(config.descend_json_mut("sources", |sources| match sources {
 				Some(json) => {
 					let conf = try!(as_object(json));
 					let mut rv = Vec::new();
 					for (id, module_conf) in conf {
-						let module_conf = try!(ann!(id, parse_source_config(&id, module_conf)));
+						let module_conf = try!(
+							annotate_error!(id, parse_source_config(&id, module_conf))
+						);
 						rv.push(module_conf);
 					}
 					Ok(rv)
