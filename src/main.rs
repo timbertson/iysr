@@ -27,15 +27,39 @@ mod system_monitor;
 mod systemd;
 mod service;
 mod journal;
+mod config;
 
 pub use monitor::*;
 pub use system_monitor::*;
 use systemd::*;
 use journal::*;
 use std::sync::{Arc,Mutex};
+use std::env;
+use std::io;
+use std::fs::File;
+use config::{Config,ConfigError};
+
+fn load_config(filename: String) -> Result<Config, ConfigError> {
+	info!("loading config file {}", filename);
+	let mut file = try!(File::open(filename));
+	Config::load(&mut file)
+}
 
 fn main () {
 	env_logger::init().unwrap();
+	let mut args = env::args().skip(1);
+	let config = args.next().ok_or(ConfigError::new("--config required".to_string()))
+		.and_then(load_config);
+	let _config = match config {
+		Ok(config) => config,
+		// XXX stderr
+		Err(e) => {
+			println!("Error loading config: {}", e);
+			return;
+		},
+	};
+
+
 	let systemd_system = SystemdMonitor::system("systemd.system".to_string());
 	let systemd_user = SystemdMonitor::user("systemd.user".to_string());
 	let journal = Journal::new().unwrap();
