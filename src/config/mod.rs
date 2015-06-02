@@ -14,278 +14,22 @@ use rustc_serialize::json;
 use chrono::{Duration};
 use monitor::Severity;
 
-type JsonMap = BTreeMap<String,Json>;
+
+#[macro_use]
+mod internal;
+mod error;
+pub use config::error::*;
+
+use config::internal::*;
+
+// why do traits need explicit imports?
+//use config::internal::{VecResultM,OptionResultM};
+
 
 // TODO: there are a bunch of `clone` calls here that wouldn't be necessary with
 // cleverer use of references
 
-macro_rules! annotate_error {
-	($key: expr, $x: expr) => {
-		match $x {
-			rv@Ok(_) => rv,
-			Err(mut e) => {
-				e.annotate($key.to_string());
-				Err(e)
-			},
-		}
-	}
-}
-
-fn type_mismatch(j:&Json, desc: &'static str) -> ConfigError {
-	ConfigError::new(format!("Expected {}, got {}", desc, json_type(j)))
-}
-
-fn json_type(j:&Json) -> &'static str {
-	match *j {
-		Json::Object(_) => "Object",
-		Json::Array(_) => "Array",
-		Json::String(_) => "String",
-		Json::Boolean(_) => "Boolean",
-		Json::Null => "Null",
-		Json::I64(_) | Json::U64(_) => "Integer",
-		Json::F64(_) => "Float",
-	}
-}
-
-fn as_string(v: &Json) -> Result<String, ConfigError> {
-	match *v {
-		Json::String(ref s) => Ok(s.to_string()),
-		ref v => Err(type_mismatch(v, "String")),
-	}
-}
-
-fn as_string_opt(v: Option<&Json>) -> Result<Option<String>, ConfigError> {
-	v.map_m(|v| as_string(&v))
-}
-
-fn mandatory(v: Option<&Json>) -> Result<&Json, ConfigError> {
-	v.ok_or(ConfigError::missing())
-}
-
-fn as_i32(v: &Json) -> Result<i32, ConfigError> {
-	match *v {
-		Json::I64(n) => Ok(n as i32),
-		Json::U64(n) => Ok(n as i32),
-
-		Json::F64(_) |
-		Json::Object(_) |
-		Json::Array(_) |
-		Json::String(_) |
-		Json::Boolean(_) |
-		Json::Null => Err(type_mismatch(v, "Integer"))
-	}
-}
-
-fn as_object(j:&Json) -> Result<JsonMap, ConfigError> {
-	match *j {
-		Json::Object(ref attrs) => Ok(attrs.clone()),
-		ref j => Err(type_mismatch(j, "Object")),
-	}
-}
-
-fn as_config(j:&Json) -> Result<ConfigCheck, ConfigError> {
-	match as_object(j) {
-		Ok(attrs) => Ok(ConfigCheck::new(attrs)),
-		Err(e) => Err(e),
-	}
-}
-
-
-fn as_array(j:&Json) -> Result<Vec<Json>, ConfigError> {
-	match *j {
-		Json::Array(ref rv) => Ok(rv.clone()),
-		ref j => Err(type_mismatch(j, "Array")),
-	}
-}
-
-
-// XXX these impls are very repetitive
-trait AnnotatedDescentJsonIter {
-	type Inner;
-	fn descend_map_json<F,R>(&self, f: F) -> Result<Vec<R>,ConfigError>
-		where F: Fn(&Json) -> Result<R,ConfigError>;
-}
-
-trait AnnotatedDescentJson {
-	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>;
-}
-
-// XXX make this AnnotatedDescentJson
-impl AnnotatedDescentJson for JsonMap {
-	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
-	{
-		let val = self.remove(key);
-		annotate_error!(key, f(val.as_ref()))
-	}
-}
-
-impl AnnotatedDescentJsonIter for Json {
-	type Inner = ConfigMap;
-	fn descend_map_json<F,R>(&self, f: F) -> Result<Vec<R>,ConfigError>
-		where F: Fn(&Json) -> Result<R,ConfigError>
-	{
-		let arr = try!(as_array(self));
-		arr.iter().enumerate().map_m(|pair| {
-			let (idx, entry) = *pair;
-			annotate_error!(idx, f(entry))
-		})
-	}
-}
-
-impl<'a, T:AnnotatedDescentJson> AnnotatedDescentJson for Option<&'a mut T> {
-	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
-	{
-		match *self {
-			Some(ref mut inner) => inner.descend_json(key, f),
-			None => annotate_error!(key, f(None)),
-		}
-	}
-}
-
-#[derive(Debug)]
-struct ConfigMap(BTreeMap<String,Json>);
-impl ConfigMap {
-	fn _remove(&mut self, key:&str) -> Option<Json> {
-		self._deref().remove(key)
-	}
-
-	fn _deref<'a>(&'a mut self) -> &'a mut JsonMap {
-		match *self {
-			ConfigMap(ref mut attrs) => attrs
-		}
-	}
-
-	fn descend_json_mut<F,R>(&mut self, key: &'static str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut Json>) -> Result<R,ConfigError>
-	{
-		annotate_error!(key,
-			f(self._remove(key).as_mut())
-		)
-	}
-
-	fn consume<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut ConfigMap>) -> Result<R,ConfigError>
-	{
-		annotate_error!(key,
-			self._remove(key)
-			.map_m(as_config)
-			.and_then(|conf| ConfigCheck::consume_opt(conf, f))
-		)
-	}
-}
-
-impl AnnotatedDescentJson for ConfigMap {
-	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
-	{
-		annotate_error!(key, f(self._remove(key).as_ref()))
-	}
-}
-
-//Boo! requires HKT?
-//trait ResultM<T> {
-//	fn map_m<F,R,E>(&self, f:F) -> Result<M<R>,E>
-//		where F:Fn(&T) -> Result<R,E>;
-//}
-
-trait OptionResultM<T> {
-	fn map_m<F,R,E>(&self, f:F) -> Result<Option<R>,E>
-		where F:FnOnce(&T) -> Result<R,E>;
-
-	fn map_m_mut<F,R,E>(&mut self, f:F) -> Result<Option<R>,E>
-		where F:FnOnce(&mut T) -> Result<R,E>;
-}
-
-trait CloneOptionResultM<T> {
-	fn clone_map_m<F,R,E>(&self, f:F) -> Result<Option<R>,E>
-		where F:FnOnce(T) -> Result<R,E>;
-}
-
-trait VecResultM<T> {
-	fn map_m<F,R,E>(&mut self, f:F) -> Result<Vec<R>,E>
-		where F:Fn(&T) -> Result<R,E>;
-}
-
-
-impl<T> OptionResultM<T> for Option<T> {
-	fn map_m<F,R,E>(&self, f:F) -> Result<Option<R>,E>
-		where F:FnOnce(&T) -> Result<R,E>
-	{
-		match *self {
-			Some(ref x) => match f(x) {
-				Ok(x) => Ok(Some(x)),
-				Err(x) => Err(x),
-			},
-			None => Ok(None),
-		}
-	}
-
-	fn map_m_mut<F,R,E>(&mut self, f:F) -> Result<Option<R>,E>
-		where F:FnOnce(&mut T) -> Result<R,E>
-	{
-		match *self {
-			Some(ref mut x) => match f(x) {
-				Ok(x) => Ok(Some(x)),
-				Err(x) => Err(x),
-			},
-			None => Ok(None),
-		}
-	}
-}
-
-impl<T:Clone> CloneOptionResultM<T> for Option<T> {
-	fn clone_map_m<F,R,E>(&self, f:F) -> Result<Option<R>,E>
-		where F:FnOnce(T) -> Result<R,E>
-	{
-		match *self {
-			Some(ref x) => match f(x.clone()) {
-				Ok(x) => Ok(Some(x)),
-				Err(x) => Err(x),
-			},
-			None => Ok(None),
-		}
-	}
-}
-
-//impl<T> VecResultM<T> for Vec<T> {
-//	fn map_m<F,R,E>(&self, f:F) -> Result<Vec<R>,E>
-//		where F:Fn(&T) -> Result<R,E>
-//	{
-//		let mut rv = Vec::with_capacity(self.len());
-//		for item in self.iter() {
-//			match f(item) {
-//				Ok(item) => rv.push(item),
-//				Err(e) => { return Err(e); },
-//			}
-//		}
-//		Ok(rv)
-//	}
-//}
-
-impl<T:Iterator> VecResultM<T::Item> for T {
-	// XXX if this were implemented on Vec, we wouldn't need &mut.
-	// But then we couldn't apply it to e.g. vec.enumerate()
-	fn map_m<F,R,E>(&mut self, f:F) -> Result<Vec<R>,E>
-		where F:Fn(&T::Item) -> Result<R,E>
-	{
-		let mut rv = Vec::new(); // XXX use size_hint
-		loop {
-			let item = self.next();
-			match item {
-				Some(item) => match f(&item) {
-					Ok(item) => rv.push(item),
-					Err(e) => { return Err(e); },
-				},
-				None => { return Ok(rv); },
-			}
-		}
-	}
-}
-
-enum Pattern {
+pub enum Pattern {
 	Glob(String),
 	Regexp(String),
 	Literal(String),
@@ -294,88 +38,6 @@ enum Pattern {
 pub struct Match {
 	attr: Option<String>,
 	pattern: Pattern,
-}
-
-#[derive(Debug)]
-pub enum ConfigErrorReason {
-	MissingKey(&'static str),
-	Missing,
-	Generic(String),
-}
-
-#[derive(Debug)]
-pub struct ConfigError {
-	reason: ConfigErrorReason,
-	context: Vec<String>,
-}
-
-impl ConfigError {
-	pub fn new(message: String) -> ConfigError {
-		ConfigError {
-			reason: ConfigErrorReason::Generic(message),
-			context: Vec::new(),
-		}
-	}
-
-	fn missing_key(key: &'static str) -> ConfigError {
-		ConfigError {
-			reason: ConfigErrorReason::MissingKey(key),
-			context: Vec::new(),
-		}
-	}
-
-	fn missing() -> ConfigError {
-		ConfigError {
-			reason: ConfigErrorReason::Missing,
-			context: Vec::new(),
-		}
-	}
-
-	fn annotate(&mut self, key: String) {
-		self.context.push(key);
-	}
-}
-
-macro_rules! coerce_to_config_error {
-	($($t:path),*) => {
-		$(
-		impl convert::From<$t> for ConfigError {
-			fn from(err: $t) -> ConfigError {
-				ConfigError::new(format!("{}", err))
-			}
-		}
-		)*
-	}
-}
-coerce_to_config_error!(ParseIntError, json::ParserError, io::Error);
-
-impl fmt::Display for ConfigError {
-	fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-		try!(match self.reason {
-			ConfigErrorReason::Generic(ref msg) => msg.fmt(formatter),
-			ConfigErrorReason::MissingKey(key) => format!("Missing config key `{}`", key).fmt(formatter),
-			ConfigErrorReason::Missing => "Missing config value".fmt(formatter),
-		});
-
-		if !self.context.is_empty() {
-			try!(" in config: `".fmt(formatter));
-			let mut path = self.context.clone();
-			path.reverse();
-			try!(path.as_slice().connect(".").fmt(formatter));
-			try!("`".fmt(formatter));
-		}
-		Ok(())
-	}
-}
-
-impl Error for ConfigError {
-	fn description(&self) -> &str {
-		match self.reason {
-			ConfigErrorReason::Generic(ref msg) => msg.as_str(),
-			ConfigErrorReason::MissingKey(_) => "MissingKey",
-			ConfigErrorReason::Missing => "Missing",
-		}
-	}
 }
 
 pub struct CommonConfig<T> {
@@ -441,93 +103,15 @@ pub struct JournalConfig {
 	backlog: Option<i32>,
 }
 
-pub struct SystemdConfig {
-	common: CommonConfig<()>,
-	user: Option<bool>,
-}
-
 pub struct JournalFilter {
 	common: FilterCommon,
 	level: Option<Severity>,
 	attr_extend: Option<JsonMap>,
 }
 
-struct ConfigCheck {
-	attrs: ConfigMap,
-	checked: bool,
-}
-
-
-// XXX should we actually implement this?
-//impl Deref for ConfigMap {
-//	type Target = JsonMap;
-//	fn deref<'a>(&'a self) -> &'a Self::Target {
-//		match *self {
-//			ConfigMap(ref attrs) => attrs
-//		}
-//	}
-//}
-//impl DerefMut for ConfigMap {
-//	fn deref_mut<'a>(&'a mut self) -> &'a mut Self::Target {
-//		match *self {
-//			ConfigMap(ref mut attrs) => attrs
-//		}
-//	}
-//}
-
-impl ConfigCheck {
-	fn new(attrs: JsonMap) -> ConfigCheck {
-		ConfigCheck {
-			attrs: ConfigMap(attrs),
-			checked: false,
-		}
-	}
-
-	fn consume_new<F,R>(attrs: JsonMap, f: F) -> Result<R, ConfigError>
-		where F: FnOnce(&mut ConfigMap) -> Result<R, ConfigError>
-	{
-		Self::consume(Self::new(attrs), f)
-	}
-
-	// Implemented as classmethod so that `self` gets moved
-	fn consume<F,R>(mut slf: Self, f: F) -> Result<R, ConfigError>
-		where F: FnOnce(&mut ConfigMap) -> Result<R, ConfigError>
-	{
-		let rv = f(&mut slf.attrs);
-
-		slf.checked = true;
-		let attrs = slf.attrs._deref();
-		let consumed = if attrs.is_empty() {
-			Ok(())
-		} else {
-			let keys : Vec<String> = attrs.keys().cloned().collect();
-			Err(ConfigError::new(format!(
-				"Unused config key(s): {}", keys.as_slice().connect(", ")
-			)))
-		};
-
-		match (rv, consumed) {
-			(Ok(_), Err(e)) => Err(e),
-			(rv, _) => rv,
-		}
-	}
-
-	fn consume_opt<F,R>(slf: Option<Self>, f: F) -> Result<R, ConfigError>
-		where F: FnOnce(Option<&mut ConfigMap>) -> Result<R, ConfigError>
-	{
-		match slf {
-			Some(conf) => Self::consume(conf, |conf| f(Some(conf))),
-			None => f(None),
-		}
-	}
-}
-
-impl Drop for ConfigCheck {
-	fn drop(&mut self) {
-		if !self.checked {
-			panic!("Logic error: ConfigCheck not checked");
-		}
-	}
+pub struct SystemdConfig {
+	common: CommonConfig<()>,
+	user: Option<bool>,
 }
 
 trait ModuleConfig {
@@ -560,7 +144,7 @@ impl ModuleConfig for JournalConfig {
 		-> Result<Self::Filter, ConfigError>
 	{
 		let level = try!(config.descend_json("level", |l|
-			l.map_m(|l| as_string(l).and_then(parse_severity))));
+			l.map_m(|l| as_string(l).and_then(as_severity))));
 
 		let attr_extend = try!(config.descend_json("attr_extend", |a|
 			a.map_m(|a| as_object(a.clone()))));
@@ -573,7 +157,7 @@ impl ModuleConfig for JournalConfig {
 	}
 }
 
-fn parse_severity(s:String) -> Result<Severity, ConfigError> {
+fn as_severity(s:String) -> Result<Severity, ConfigError> {
 	match s.as_str() {
 		"Emergency" => Ok(Severity::Emergency),
 		"Alert"     => Ok(Severity::Alert),
@@ -583,8 +167,7 @@ fn parse_severity(s:String) -> Result<Severity, ConfigError> {
 		"Notice"    => Ok(Severity::Notice),
 		"Info"      => Ok(Severity::Info),
 		"Debug"     => Ok(Severity::Debug),
-		other       => Err(ConfigError::new(format!(
-		                   "Unknown severity: {}", other))),
+		other       => Err(ConfigError::new(format!("Unknown severity: {}", other))),
 	}
 }
 
@@ -615,19 +198,18 @@ impl ModuleConfig for SystemdConfig {
 	}
 }
 
-
 fn parse_source_config(id: &String, conf: Json) -> Result<SourceConfig, ConfigError> {
 	let (module, conf) = match conf {
 		Json::Boolean(true) => (None, None),
 		Json::Object(mut attrs) => {
 			let module = try!(attrs.descend_json("module", as_string_opt));
-			(module, Some(ConfigCheck::new(attrs)))
+			(module, Some(attrs))
 		},
 		ref other => {
 			return Err(type_mismatch(other, "Object or `true`"));
 		},
 	};
-	ConfigCheck::consume_opt(conf, |conf| {
+	ConfigCheck::consume_new_opt(conf, |conf| {
 		let id = id.clone();
 		Ok(match module.unwrap_or(id.clone()).as_str() {
 			"systemd" => {
