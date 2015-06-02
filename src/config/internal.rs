@@ -55,6 +55,13 @@ pub fn as_string(v: &Json) -> Result<String, ConfigError> {
 	}
 }
 
+pub fn as_boolean(v: &Json) -> Result<bool, ConfigError> {
+	match *v {
+		Json::Boolean(ref s) => Ok(*s),
+		ref v => Err(type_mismatch(v, "Boolean")),
+	}
+}
+
 pub fn as_string_opt(v: Option<&Json>) -> Result<Option<String>, ConfigError> {
 	v.map_m(|v| as_string(&v))
 }

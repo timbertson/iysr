@@ -85,7 +85,6 @@ impl FilterCommon {
 
 	fn parse_matchers(json: Option<&Json>) -> Result<Option<Vec<Match>>, ConfigError> {
 		json.map_m(|json:&&Json|
-			// XXX this is a **json, which is dumb.
 			json.descend_map_json(Self::parse_matcher)
 		)
 	}
@@ -128,8 +127,7 @@ impl ModuleConfig for JournalConfig {
 		-> Result<Self, ConfigError>
 	{
 		let backlog = try!(config.descend_json("backlog",
-			// XXX can we get rid of this double-ref?
-			|b| b.map_m(|b: &&Json| as_i32(b)))
+			|b| b.clone().map_m(|b| as_i32(b)))
 		);
 
 		Ok(JournalConfig {
@@ -147,7 +145,7 @@ impl ModuleConfig for JournalConfig {
 			l.map_m(|l| as_string(l).and_then(as_severity))));
 
 		let attr_extend = try!(config.descend_json("attr_extend", |a|
-			a.map_m(|a| as_object(a.clone()))));
+			a.map_m(|a| as_object(a))));
 
 		Ok(JournalFilter {
 			common: common,
@@ -178,11 +176,9 @@ impl ModuleConfig for SystemdConfig {
 		mut config: Option<&mut ConfigMap>)
 		-> Result<Self, ConfigError>
 	{
-		let user = try!(config.descend_json("user", |u| match u {
-			None => Ok(None),
-			Some(&Json::Boolean(ref u)) => Ok(Some(u.clone())),
-			Some(ref other) => Err(type_mismatch(other, "boolean")),
-		}));
+		let user = try!(config.descend_json("user",
+			|u| u.map_m(|u| as_boolean(u))
+		));
 		Ok(SystemdConfig {
 			common: common,
 			user: user,
