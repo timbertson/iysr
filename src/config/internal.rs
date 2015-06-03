@@ -63,7 +63,7 @@ pub fn as_boolean(v: Json) -> Result<bool, ConfigError> {
 }
 
 pub fn as_string_opt(v: Option<Json>) -> Result<Option<String>, ConfigError> {
-	v.consume_m(as_string)
+	v.map_m(as_string)
 }
 
 pub fn mandatory(v: Option<Json>) -> Result<Json, ConfigError> {
@@ -195,46 +195,54 @@ impl ConfigMap {
 	{
 		annotate_error!(key,
 			self._remove(key)
-			.consume_m(as_config)
+			.map_m(as_config)
 			.and_then(|conf| ConfigCheck::consume_opt(conf, f))
 		)
 	}
 }
 
+
+
 // A trait which can "map" over the Result type.
 // An Err() result in _any_ of the elements is promoted to
 // an early Err() return, while an input of all Ok(T) elements
 // is wrapped up as a single Ok(Collection<T>) result.
-pub trait ResultM<I,O> {
+//
+// This API consumes the subject, which is appropriate
+// for the config API. ResultRefM will let you map over references,
+// but there's currently no use of it.
+
+pub trait ResultRefM<I,O> {
 	type OutputWrapper;
-	fn map_m<F,E>(&self, f:F) -> Result<Self::OutputWrapper,E>
+	fn map_ref_m<F,E>(&self, f:F) -> Result<Self::OutputWrapper,E>
 		where F:Fn(&I) -> Result<O,E>;
 }
-
-// Like ResultM, but consumes itself. This is required for ephemeral
-// iterators like Enumerate<T>, otherwise we'd need to make map_m
-// take a &mut self.
-// It's also convenient for any collections which we're completely
-// consuming, particularly when they are Option<&T>. Using a plain
-// map_m leads to taking an F(&&T), which is valid but silly.
-pub trait ConsumeResultM<I,O> {
-	type OutputWrapper;
-	fn consume_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
-		where F:Fn(I) -> Result<O,E>;
-}
-
-impl<I,O> ResultM<I,O> for Vec<I> {
+impl<I,O> ResultRefM<I,O> for Vec<I> {
 	type OutputWrapper = Vec<O>;
-	fn map_m<F,E>(&self, f:F) -> Result<Self::OutputWrapper,E>
+	fn map_ref_m<F,E>(&self, f:F) -> Result<Self::OutputWrapper,E>
+		where F:Fn(&I) -> Result<O,E>
+	{
+		Self::OutputWrapper::run_m(self.iter().map(f))
+	}
+}
+impl<I,O> ResultRefM<I,O> for Option<I> {
+	type OutputWrapper = Option<O>;
+	fn map_ref_m<F,E>(&self, f:F) -> Result<Self::OutputWrapper,E>
 		where F:Fn(&I) -> Result<O,E>
 	{
 		Self::OutputWrapper::run_m(self.iter().map(f))
 	}
 }
 
+pub trait ConsumeResultM<I,O> {
+	type OutputWrapper;
+	fn map_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
+		where F:Fn(I) -> Result<O,E>;
+}
+
 impl<I,O,IT:Iterator<Item=I>> ConsumeResultM<(usize,I),O> for ::std::iter::Enumerate<IT> {
 	type OutputWrapper = Vec<O>;
-	fn consume_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
+	fn map_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
 		where F:Fn((usize,I)) -> Result<O,E>
 	{
 		Self::OutputWrapper::run_m(self.map(f))
@@ -255,7 +263,7 @@ impl<T> Iterator for ConsumeOption<T> {
 
 impl<I,O> ConsumeResultM<I,O> for Option<I> {
 	type OutputWrapper = Option<O>;
-	fn consume_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
+	fn map_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
 		where F:Fn(I) -> Result<O,E>
 	{
 		Self::OutputWrapper::run_m(&mut (ConsumeOption(self.map(f))))
@@ -282,20 +290,11 @@ impl<T> Iterator for ConsumeVec<T> {
 
 impl<I,O> ConsumeResultM<I,O> for Vec<I> {
 	type OutputWrapper = Vec<O>;
-	fn consume_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
+	fn map_m<F,E>(self, f:F) -> Result<Self::OutputWrapper,E>
 		where F:Fn(I) -> Result<O,E>
 	{
 		let iter = ConsumeVec::new(self);
 		Self::OutputWrapper::run_m(iter.map(f))
-	}
-}
-
-impl<I,O> ResultM<I,O> for Option<I> {
-	type OutputWrapper = Option<O>;
-	fn map_m<F,E>(&self, f:F) -> Result<Self::OutputWrapper,E>
-		where F:Fn(&I) -> Result<O,E>
-	{
-		Self::OutputWrapper::run_m(self.iter().map(f))
 	}
 }
 
@@ -390,7 +389,7 @@ impl AnnotatedDescentJsonIter for Json {
 		where F: Fn(Json) -> Result<R,ConfigError>
 	{
 		let arr = try!(as_array(self));
-		ConsumeVec::new(arr).enumerate().consume_m(|(idx, entry)| {
+		ConsumeVec::new(arr).enumerate().map_m(|(idx, entry)| {
 			annotate_error!(idx, f(entry))
 		})
 	}
