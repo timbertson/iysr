@@ -84,7 +84,7 @@ impl FilterCommon {
 	}
 
 	fn parse_matchers(json: Option<&Json>) -> Result<Option<Vec<Match>>, ConfigError> {
-		json.map_m(|json:&&Json|
+		json.consume_m(|json|
 			json.descend_map_json(Self::parse_matcher)
 		)
 	}
@@ -127,7 +127,7 @@ impl ModuleConfig for JournalConfig {
 		-> Result<Self, ConfigError>
 	{
 		let backlog = try!(config.descend_json("backlog",
-			|b| b.clone().map_m(|b| as_i32(b)))
+			|b| b.consume_m(as_i32))
 		);
 
 		Ok(JournalConfig {
@@ -142,10 +142,10 @@ impl ModuleConfig for JournalConfig {
 		-> Result<Self::Filter, ConfigError>
 	{
 		let level = try!(config.descend_json("level", |l|
-			l.map_m(|l| as_string(l).and_then(as_severity))));
+			l.consume_m(|l| as_string(l).and_then(as_severity))));
 
 		let attr_extend = try!(config.descend_json("attr_extend", |a|
-			a.map_m(|a| as_object(a))));
+			a.consume_m(as_object)));
 
 		Ok(JournalFilter {
 			common: common,
@@ -177,7 +177,7 @@ impl ModuleConfig for SystemdConfig {
 		-> Result<Self, ConfigError>
 	{
 		let user = try!(config.descend_json("user",
-			|u| u.map_m(|u| as_boolean(u))
+			|u| u.consume_m(as_boolean)
 		));
 		Ok(SystemdConfig {
 			common: common,
@@ -237,7 +237,7 @@ fn parse_module<T:ModuleConfig>(id: String, attrs: Option<&mut ConfigMap>) -> Re
 		},
 		Some(attrs) => {
 			let filters = try!(attrs.descend_json("filters", |filters| {
-				filters.map_m(|filters:&&Json|
+				filters.consume_m(|filters|
 					filters.descend_map_json(|filter|
 						as_config(filter)
 							.and_then(|filter| ConfigCheck::consume(filter, parse_filter::<T>))
