@@ -26,9 +26,6 @@ use config::internal::*;
 //use config::internal::{VecResultM,OptionResultM};
 
 
-// TODO: there are a bunch of `clone` calls here that wouldn't be necessary with
-// cleverer use of references
-
 pub enum Pattern {
 	Glob(String),
 	Regexp(String),
@@ -51,17 +48,16 @@ pub struct FilterCommon {
 }
 
 impl FilterCommon {
-	fn parse_matcher(matcher: &Json) -> Result<Match, ConfigError>
-	{
-		match *matcher {
-			Json::String(ref lit) => {
+	fn parse_matcher(matcher: Json) -> Result<Match, ConfigError> {
+		match matcher {
+			Json::String(lit) => {
 				Ok(Match {
 					attr: None,
-					pattern: Pattern::Literal(lit.clone()),
+					pattern: Pattern::Literal(lit),
 				})
 			},
-			Json::Object(ref attrs) => {
-				ConfigCheck::consume_new(attrs.clone(), |attrs| {
+			Json::Object(attrs) => {
+				ConfigCheck::consume_new(attrs, |attrs| {
 					let attr = try!(attrs.descend_json("attr", as_string_opt));
 					let typ = try!(attrs.descend_json("type", |t| mandatory(t).and_then(as_string)));
 					let pat = try!(attrs.descend_json("pattern", |t| mandatory(t).and_then(as_string)));
@@ -83,7 +79,7 @@ impl FilterCommon {
 		}
 	}
 
-	fn parse_matchers(json: Option<&Json>) -> Result<Option<Vec<Match>>, ConfigError> {
+	fn parse_matchers(json: Option<Json>) -> Result<Option<Vec<Match>>, ConfigError> {
 		json.consume_m(|json|
 			json.descend_map_json(Self::parse_matcher)
 		)
@@ -321,13 +317,13 @@ impl Config {
 	}
 
 	pub fn parse(config:Json) -> Result<Config, ConfigError> {
-		let config = try!(as_config(&config));
+		let config = try!(as_config(config));
 		ConfigCheck::consume(config, |config| {
 			let poll = try!(config.consume("poll", |p| match p {
 				None => Ok(PollConfig::default()),
 				Some(c) => PollConfig::parse(c),
 			}));
-			let sources = try!(config.descend_json_mut("sources", |sources| match sources {
+			let sources = try!(config.descend_json("sources", |sources| match sources {
 				Some(json) => {
 					let conf = try!(as_object(json));
 					let mut rv = Vec::new();

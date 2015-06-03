@@ -48,30 +48,30 @@ pub fn json_type(j:&Json) -> &'static str {
 	}
 }
 
-pub fn as_string(v: &Json) -> Result<String, ConfigError> {
-	match *v {
-		Json::String(ref s) => Ok(s.to_string()),
-		ref v => Err(type_mismatch(v, "String")),
+pub fn as_string(v: Json) -> Result<String, ConfigError> {
+	match v {
+		Json::String(s) => Ok(s.to_string()),
+		v => Err(type_mismatch(&v, "String")),
 	}
 }
 
-pub fn as_boolean(v: &Json) -> Result<bool, ConfigError> {
-	match *v {
-		Json::Boolean(ref s) => Ok(*s),
-		ref v => Err(type_mismatch(v, "Boolean")),
+pub fn as_boolean(v: Json) -> Result<bool, ConfigError> {
+	match v {
+		Json::Boolean(s) => Ok(s),
+		v => Err(type_mismatch(&v, "Boolean")),
 	}
 }
 
-pub fn as_string_opt(v: Option<&Json>) -> Result<Option<String>, ConfigError> {
-	v.map_m(|v| as_string(&v))
+pub fn as_string_opt(v: Option<Json>) -> Result<Option<String>, ConfigError> {
+	v.consume_m(as_string)
 }
 
-pub fn mandatory(v: Option<&Json>) -> Result<&Json, ConfigError> {
+pub fn mandatory(v: Option<Json>) -> Result<Json, ConfigError> {
 	v.ok_or(ConfigError::missing())
 }
 
-pub fn as_i32(v: &Json) -> Result<i32, ConfigError> {
-	match *v {
+pub fn as_i32(v: Json) -> Result<i32, ConfigError> {
+	match v {
 		Json::I64(n) => Ok(n as i32),
 		Json::U64(n) => Ok(n as i32),
 
@@ -80,18 +80,18 @@ pub fn as_i32(v: &Json) -> Result<i32, ConfigError> {
 		Json::Array(_) |
 		Json::String(_) |
 		Json::Boolean(_) |
-		Json::Null => Err(type_mismatch(v, "Integer"))
+		Json::Null => Err(type_mismatch(&v, "Integer"))
 	}
 }
 
-pub fn as_object(j:&Json) -> Result<JsonMap, ConfigError> {
-	match *j {
-		Json::Object(ref attrs) => Ok(attrs.clone()),
-		ref j => Err(type_mismatch(j, "Object")),
+pub fn as_object(j:Json) -> Result<JsonMap, ConfigError> {
+	match j {
+		Json::Object(attrs) => Ok(attrs),
+		j => Err(type_mismatch(&j, "Object")),
 	}
 }
 
-pub fn as_config(j:&Json) -> Result<ConfigCheck, ConfigError> {
+pub fn as_config(j:Json) -> Result<ConfigCheck, ConfigError> {
 	match as_object(j) {
 		Ok(attrs) => Ok(ConfigCheck::new(attrs)),
 		Err(e) => Err(e),
@@ -99,10 +99,10 @@ pub fn as_config(j:&Json) -> Result<ConfigCheck, ConfigError> {
 }
 
 
-pub fn as_array(j:&Json) -> Result<Vec<Json>, ConfigError> {
-	match *j {
-		Json::Array(ref rv) => Ok(rv.clone()),
-		ref j => Err(type_mismatch(j, "Array")),
+pub fn as_array(j:Json) -> Result<Vec<Json>, ConfigError> {
+	match j {
+		Json::Array(rv) => Ok(rv),
+		j => Err(type_mismatch(&j, "Array")),
 	}
 }
 
@@ -190,20 +190,12 @@ impl ConfigMap {
 		}
 	}
 
-	pub fn descend_json_mut<F,R>(&mut self, key: &'static str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&mut Json>) -> Result<R,ConfigError>
-	{
-		annotate_error!(key,
-			f(self._remove(key).as_mut())
-		)
-	}
-
 	pub fn consume<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
 		where F: FnOnce(Option<&mut ConfigMap>) -> Result<R,ConfigError>
 	{
 		annotate_error!(key,
 			self._remove(key)
-			.map_m(as_config)
+			.consume_m(as_config)
 			.and_then(|conf| ConfigCheck::consume_opt(conf, f))
 		)
 	}
@@ -349,42 +341,28 @@ impl<T,E,IT: Iterator<Item=Result<T,E>>> RunM<T,E,IT> for Vec<T> {
 	}
 }
 
-// TODO there sure is a lot of noise in this...
-pub trait AnnotatedDescentJsonIter {
-	type Inner;
-	fn descend_map_json<F,R>(&self, f: F) -> Result<Vec<R>,ConfigError>
-		where F: Fn(&Json) -> Result<R,ConfigError>;
-}
-
+// Traits for descending into (& consuming) an attribute
+// as either Json data or a sub-ConfigMap object.
+// Use of these methods will ensure that Error results will be correctly
+// annotated with the attribute path in which the problem occurred.
 pub trait AnnotatedDescentJson {
 	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>;
+		where F: FnOnce(Option<Json>) -> Result<R,ConfigError>;
 }
 
 impl AnnotatedDescentJson for JsonMap {
 	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
+		where F: FnOnce(Option<Json>) -> Result<R,ConfigError>
 	{
 		let val = self.remove(key);
-		annotate_error!(key, f(val.as_ref()))
+		annotate_error!(key, f(val))
 	}
 }
 
-impl AnnotatedDescentJsonIter for Json {
-	type Inner = ConfigMap;
-	fn descend_map_json<F,R>(&self, f: F) -> Result<Vec<R>,ConfigError>
-		where F: Fn(&Json) -> Result<R,ConfigError>
-	{
-		let arr = try!(as_array(self));
-		arr.iter().enumerate().consume_m(|(idx,entry)| {
-			annotate_error!(idx, f(entry))
-		})
-	}
-}
-
+// Treat descent over a None<T> as if it were a T with no properties
 impl<'a, T:AnnotatedDescentJson> AnnotatedDescentJson for Option<&'a mut T> {
 	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
+		where F: FnOnce(Option<Json>) -> Result<R,ConfigError>
 	{
 		match *self {
 			Some(ref mut inner) => inner.descend_json(key, f),
@@ -395,8 +373,26 @@ impl<'a, T:AnnotatedDescentJson> AnnotatedDescentJson for Option<&'a mut T> {
 
 impl AnnotatedDescentJson for ConfigMap {
 	fn descend_json<F,R>(&mut self, key: &str, f: F) -> Result<R,ConfigError>
-		where F: FnOnce(Option<&Json>) -> Result<R,ConfigError>
+		where F: FnOnce(Option<Json>) -> Result<R,ConfigError>
 	{
-		annotate_error!(key, f(self._remove(key).as_ref()))
+		annotate_error!(key, f(self._remove(key)))
 	}
 }
+
+// Consumes an enture array and descends into each index.
+pub trait AnnotatedDescentJsonIter {
+	fn descend_map_json<F,R>(self, f: F) -> Result<Vec<R>,ConfigError>
+		where F: Fn(Json) -> Result<R,ConfigError>;
+}
+
+impl AnnotatedDescentJsonIter for Json {
+	fn descend_map_json<F,R>(self, f: F) -> Result<Vec<R>,ConfigError>
+		where F: Fn(Json) -> Result<R,ConfigError>
+	{
+		let arr = try!(as_array(self));
+		ConsumeVec::new(arr).enumerate().consume_m(|(idx, entry)| {
+			annotate_error!(idx, f(entry))
+		})
+	}
+}
+
