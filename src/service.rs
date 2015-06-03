@@ -136,7 +136,7 @@ pub fn main(monitor: SystemMonitor) -> Result<(),InternalError> {
 	let server = Server { monitor: Mutex::new(Box::new(monitor)), };
 	match hyper::Server::http(server).listen("127.0.0.1:3000") {
 		Ok(_) => {
-			info!("Server listening on port 3000");
+			errln!("Server listening on port 3000");
 			Ok(())
 		},
 		Err(e) => Err(InternalError::new(format!("Server failed to start: {}", e))),

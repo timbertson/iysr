@@ -15,6 +15,7 @@ use monitor::*;
 use std::thread::JoinHandle;
 use util::read_all;
 use systemd::RuntimeError;
+use config::{JournalConfig};
 
 type SharedRef<T> = Arc<Mutex<T>>;
 
@@ -24,7 +25,10 @@ pub struct Journal {
 }
 
 impl Journal {
-	pub fn new() -> Result<Journal, InternalError> {
+	pub fn new(conf: JournalConfig) -> Result<Journal, InternalError> {
+		let backlog = conf.backlog.unwrap_or(0);
+		// TODO: use backlog
+		// TODO: use common.filters
 		let subscribers = Arc::new(Mutex::new(Vec::new()));
 		let subscribers2 = subscribers.clone();
 		let thread = try!(thread::Builder::new().spawn(move ||

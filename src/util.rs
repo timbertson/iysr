@@ -16,6 +16,13 @@ macro_rules! ignore_error {
 	)
 }
 
+macro_rules! errln {
+	($($arg:tt)*) => (
+		let _ign = writeln!(&mut ::std::io::stderr(), $($arg)* );
+	)
+}
+
+
 
 pub fn read_all(source: &mut io::Read) -> Result<String, InternalError> {
 	let mut buf = Vec::new();

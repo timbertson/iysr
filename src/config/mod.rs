@@ -38,13 +38,13 @@ pub struct Match {
 }
 
 pub struct CommonConfig<T> {
-	filters: Vec<T>,
-	id:String,
+	pub filters: Vec<T>,
+	pub id:String,
 }
 
 pub struct FilterCommon {
-	include: Option<Vec<Match>>,
-	exclude: Option<Vec<Match>>,
+	pub include: Option<Vec<Match>>,
+	pub exclude: Option<Vec<Match>>,
 }
 
 impl FilterCommon {
@@ -94,19 +94,19 @@ impl FilterCommon {
 }
 
 pub struct JournalConfig {
-	common: CommonConfig<JournalFilter>,
-	backlog: Option<i32>,
+	pub common: CommonConfig<JournalFilter>,
+	pub backlog: Option<i32>,
 }
 
 pub struct JournalFilter {
-	common: FilterCommon,
-	level: Option<Severity>,
-	attr_extend: Option<JsonMap>,
+	pub common: FilterCommon,
+	pub level: Option<Severity>,
+	pub attr_extend: Option<JsonMap>,
 }
 
 pub struct SystemdConfig {
-	common: CommonConfig<()>,
-	user: Option<bool>,
+	pub common: CommonConfig<()>,
+	pub user: Option<bool>,
 }
 
 trait ModuleConfig {

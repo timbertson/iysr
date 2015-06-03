@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use rustc_serialize::json::{Json};
 use chrono::{DateTime,Local};
 use monitor::*;
+use config::SystemdConfig;
 use util::read_all;
 
 const MAX_EXECV_ARGLEN : usize = 4096; // conservative, actually much higher on most linux systems
@@ -47,27 +48,23 @@ pub struct SystemdPusher {
 }
 
 impl SystemdMonitor {
-	fn new(id: String, user: bool) -> SystemdMonitor {
+	pub fn new(conf: SystemdConfig) -> SystemdMonitor {
+		let common = conf.common;
+		let user = conf.user.unwrap_or(false);
+
+		// TODO: use includes instead of hard-coded stufff
 		let mut ignored = HashSet::new();
-		// XXX make configurable
 		ignored.insert(String::from_str("device"));
 		ignored.insert(String::from_str("target"));
 		ignored.insert(String::from_str("slice"));
 		ignored.insert(String::from_str("machine"));
 		ignored.insert(String::from_str("mount"));
+
 		SystemdMonitor {
-			id: id,
+			id: common.id,
 			user: user,
 			ignored_types: ignored,
 		}
-	}
-
-	pub fn system(id: String) -> SystemdMonitor {
-		Self::new(id, false)
-	}
-
-	pub fn user(id: String) -> SystemdMonitor {
-		Self::new(id, true)
 	}
 
 	pub fn poller(&self) -> Box<SystemdPoller> {

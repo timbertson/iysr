@@ -35,39 +35,78 @@ use systemd::*;
 use journal::*;
 use std::sync::{Arc,Mutex};
 use std::env;
+use std::process;
 use std::io;
+use std::io::Write;
 use std::fs::File;
-use config::{Config,ConfigError};
+use config::{Config,ConfigError, SourceConfig};
 
 fn load_config(filename: String) -> Result<Config, ConfigError> {
-	info!("loading config file {}", filename);
+	errln!("Loading config from {}", filename);
 	let mut file = try!(File::open(filename));
 	Config::load(&mut file)
 }
 
+fn run(config: Config) -> Result<(), InternalError> {
+	let mut pull_sources : Vec<Box<PullDataSource>> = Vec::new();
+	let mut push_sources : Vec<Box<PushDataSource>> = Vec::new();
+
+	for module in config.sources {
+		match module {
+			SourceConfig::Systemd(conf) => {
+				let systemd = SystemdMonitor::new(conf);
+				pull_sources.push(systemd.poller());
+			},
+			SourceConfig::Journal(conf) => {
+				let journal = try!(Journal::new(conf));
+				push_sources.push(Box::new(journal));
+			},
+		}
+	}
+
+	let monitor = try!(SystemMonitor::new(
+		20000,
+		50,
+		pull_sources,
+		push_sources
+	));
+	service::main(monitor)
+}
+
+
+macro_rules! fail{
+	($($arg:tt)*) => {
+		{
+			errln!($($arg)*);
+			process::exit(1);
+		}
+	}
+}
+
 fn main () {
 	env_logger::init().unwrap();
+	let mut stderr = io::stderr();
 	let mut args = env::args().skip(1);
-	let config = args.next().ok_or(ConfigError::new("--config required".to_string()))
-		.and_then(load_config);
-	let _config = match config {
+	let config = args.next().ok_or(ConfigError::new("--config required".to_string()));
+	match args.next() {
+		Some(_) => fail!("Too many arguments"),
+		None => (),
+	};
+
+	let config = match config.and_then(load_config) {
 		Ok(config) => config,
-		// XXX stderr
 		Err(e) => {
-			println!("Error loading config: {}", e);
-			return;
+			fail!("Error loading config: {}", e);
 		},
 	};
 
+	match run(config) {
+		Ok(config) => config,
+		// XXX stderr
+		Err(e) => {
+			writeln!(&mut stderr, "Error: {}", e).unwrap();
+			process::exit(1);
+		},
+	};
 
-	let systemd_system = SystemdMonitor::system("systemd.system".to_string());
-	let systemd_user = SystemdMonitor::user("systemd.user".to_string());
-	let journal = Journal::new().unwrap();
-	let monitor = SystemMonitor::new(
-		20000,
-		50,
-		vec!(systemd_system.poller(), systemd_user.poller()),
-		vec!(systemd_system.pusher(), systemd_user.pusher(), Box::new(journal))
-	).unwrap();
-	service::main(monitor).unwrap();
 }
