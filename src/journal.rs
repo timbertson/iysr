@@ -16,6 +16,7 @@ use std::thread::JoinHandle;
 use util::read_all;
 use systemd::RuntimeError;
 use config::{JournalConfig};
+use filter::filter;
 
 type SharedRef<T> = Arc<Mutex<T>>;
 
@@ -26,13 +27,12 @@ pub struct Journal {
 
 impl Journal {
 	pub fn new(conf: JournalConfig) -> Result<Journal, InternalError> {
-		let backlog = conf.backlog.unwrap_or(0);
 		// TODO: use backlog
 		// TODO: use common.filters
 		let subscribers = Arc::new(Mutex::new(Vec::new()));
 		let subscribers2 = subscribers.clone();
 		let thread = try!(thread::Builder::new().spawn(move ||
-			Self::run_thread(subscribers)
+			Self::run_thread(conf, subscribers)
 		));
 		Ok(Journal {
 			subscribers: subscribers2,
@@ -67,9 +67,13 @@ impl Journal {
 		}
 	}
 
-	fn run_thread(mut subscribers: SharedRef<Vec<SyncSender<Arc<Update>>>>) -> Result<(), InternalError> {
+	fn run_thread(
+		config: JournalConfig,
+		mut subscribers: SharedRef<Vec<SyncSender<Arc<Update>>>>
+	) -> Result<(), InternalError>
+	{
 		loop {
-			match Self::follow_journal(&mut subscribers) {
+			match Self::follow_journal(&config, &mut subscribers) {
 				Ok(()) => (),
 				Err(e) => {
 					Self::send_update(&mut subscribers, Arc::new(Update {
@@ -88,7 +92,11 @@ impl Journal {
 		}
 	}
 
-	fn follow_journal(subscribers: &mut SharedRef<Vec<SyncSender<Arc<Update>>>>) -> Result<(), InternalError> {
+	fn follow_journal(
+		config: &JournalConfig,
+		subscribers: &mut SharedRef<Vec<SyncSender<Arc<Update>>>>
+	) -> Result<(), InternalError>
+	{
 		let mut child = try!(Self::spawn());
 		let stdout = BufReader::new(try!(child.stdout.take().ok_or(RuntimeError::ChildOutputStreamMissing)));
 		let mut stderr = try!(child.stderr.take().ok_or(RuntimeError::ChildOutputStreamMissing));
@@ -96,46 +104,52 @@ impl Journal {
 		let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
 			for line_r in stdout.lines() {
 				let line = try!(line_r);
-				debug!("got journal line: {}", line);
+				trace!("got journal line: {}", line);
 				let event = match Json::from_str(line.as_str()) {
-					Ok(Json::Object(mut attrs)) => {
-						let message = match attrs.remove("MESSAGE") {
-							Some(Json::String(m)) => Some(m),
-							_ => None,
-						};
+					Ok(Json::Object(attrs)) => {
+						filter(&("TODO: id".to_string()), &config.common.filters, attrs).map(|mut attrs| {
+							let message = match attrs.remove("MESSAGE") {
+								Some(Json::String(m)) => Some(m),
+								_ => None,
+							};
 
-						
-						// TODO: filter attribs via config, as most of these are totally unnecessary
-						let mut _attrs = HashMap::new();
-						for (k,v) in attrs {
-							if k.starts_with('_') { continue; }
-							_attrs.insert(k,v);
-						}
+							// TODO: filter attribs via config
+							let mut _attrs = HashMap::new();
+							for (k,v) in attrs {
+								if k.starts_with('_') { continue; }
+								_attrs.insert(k,v);
+							}
 
-						Event {
-							id: None,
-							severity: Some(Severity::Warning),
-							message: message,
-							attrs: Arc::new(_attrs),
-						}
+							Event {
+								id: None,
+								severity: Some(Severity::Warning),
+								message: message,
+								attrs: Arc::new(_attrs),
+							}
+						})
 					},
 					_ => {
-						Event {
-							id: None,
-							severity: Some(Severity::Warning),
+						Some(Event {
+							id: Some("internal".to_string()),
+							severity: Some(Severity::Info),
 							message: Some(format!("Unparseable journal line: {}", line)),
 							attrs: Arc::new(HashMap::new()),
-						}
+						})
 					},
 				};
-				{
-					let update = Arc::new(Update {
-						data: Data::Event(event),
-						source: "TODO".to_string(),
-						typ: "journal".to_string(),
-						time: Time::now(),
-					});
-					Self::send_update(subscribers, update);
+				match event {
+					Some(event) => {
+						let update = Arc::new(Update {
+							data: Data::Event(event),
+							source: "TODO".to_string(),
+							typ: "journal".to_string(),
+							time: Time::now(),
+						});
+						Self::send_update(subscribers, update);
+					},
+					None => {
+						trace!("item filtered");
+					}
 				}
 			}
 			Err(InternalError::new("journalctl ended".to_string()))

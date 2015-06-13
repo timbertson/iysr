@@ -1,4 +1,6 @@
 use std::io;
+use std::collections::{BTreeMap};
+use rustc_serialize::json::{Json};
 use monitor::*;
 
 macro_rules! log_error {
@@ -22,7 +24,7 @@ macro_rules! errln {
 	)
 }
 
-
+pub type JsonMap = BTreeMap<String,Json>;
 
 pub fn read_all(source: &mut io::Read) -> Result<String, InternalError> {
 	let mut buf = Vec::new();

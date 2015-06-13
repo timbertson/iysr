@@ -15,10 +15,9 @@ use rustc_serialize::json::{Json,ToJson};
 use rustc_serialize::json;
 use chrono::{Duration};
 use monitor::Severity;
+use util::*;
 
 use config::error::*;
-
-pub type JsonMap = BTreeMap<String,Json>;
 
 macro_rules! annotate_error {
 	($key: expr, $x: expr) => {

@@ -4,11 +4,13 @@ version = "0.0.1"
 
 [dependencies]
 chrono = "0.2.14"
-
-# server
-hyper = "*"
+glob = "*"
+regex = "*"
 rustc-serialize = "*"
 log = "*"
 env_logger = "*"
 schedule_recv = "*"
 tojson_macros = "*"
+
+# server
+hyper = "*"

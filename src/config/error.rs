@@ -65,7 +65,7 @@ macro_rules! coerce_to_config_error {
 		)*
 	}
 }
-coerce_to_config_error!(ParseIntError, json::ParserError, io::Error);
+coerce_to_config_error!(ParseIntError, json::ParserError, io::Error, ::glob::PatternError, ::regex::Error);
 
 impl fmt::Display for ConfigError {
 	fn fmt(&self, formatter: &mut fmt::Formatter) -> Result<(), fmt::Error> {

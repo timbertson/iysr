@@ -13,6 +13,8 @@ use rustc_serialize::json::{Json,ToJson};
 use rustc_serialize::json;
 use chrono::{Duration};
 use monitor::Severity;
+use util::*;
+use regex::Regex;
 
 
 #[macro_use]
@@ -22,19 +24,15 @@ pub use config::error::*;
 
 use config::internal::*;
 
-// why do traits need explicit imports?
-//use config::internal::{VecResultM,OptionResultM};
-
-
 pub enum Pattern {
-	Glob(String),
-	Regexp(String),
+	Glob(::glob::Pattern),
+	Regex(Regex),
 	Literal(String),
 }
 
 pub struct Match {
-	attr: Option<String>,
-	pattern: Pattern,
+	pub attr: Option<String>,
+	pub pattern: Pattern,
 }
 
 pub struct CommonConfig<T> {
@@ -43,8 +41,8 @@ pub struct CommonConfig<T> {
 }
 
 pub struct FilterCommon {
-	pub include: Option<Vec<Match>>,
-	pub exclude: Option<Vec<Match>>,
+	pub include: Vec<Match>,
+	pub exclude: Vec<Match>,
 }
 
 impl FilterCommon {
@@ -62,8 +60,8 @@ impl FilterCommon {
 					let typ = try!(attrs.descend_json("type", |t| mandatory(t).and_then(as_string)));
 					let pat = try!(attrs.descend_json("pattern", |t| mandatory(t).and_then(as_string)));
 					let pat = match typ.as_str() {
-						"glob" => Pattern::Glob(pat),
-						"regexp" => Pattern::Regexp(pat),
+						"glob" => Pattern::Glob(try!(::glob::Pattern::new(pat.as_str()))),
+						"regex" => Pattern::Regex(try!(Regex::new(pat.as_str()))),
 						"literal" => Pattern::Literal(pat),
 						other => {
 							return Err(ConfigError::new(format!("Unsupported pattern type: {}", other)));
@@ -79,10 +77,11 @@ impl FilterCommon {
 		}
 	}
 
-	fn parse_matchers(json: Option<Json>) -> Result<Option<Vec<Match>>, ConfigError> {
-		json.map_m(|json|
-			json.descend_map_json(Self::parse_matcher)
-		)
+	fn parse_matchers(json: Option<Json>) -> Result<Vec<Match>, ConfigError> {
+		match json {
+			Some(json) => json.descend_map_json(Self::parse_matcher),
+			None => Ok(Vec::new()),
+		}
 	}
 
 	fn parse(attrs: &mut ConfigMap) -> Result<FilterCommon, ConfigError> {
@@ -349,7 +348,7 @@ impl Config {
 							common: CommonConfig {
 								filters: vec!(
 									JournalFilter {
-										common: FilterCommon { include: None, exclude: None, },
+										common: FilterCommon { include: Vec::new(), exclude: Vec::new(), },
 										level: Some(Severity::Warning),
 										attr_extend: None,
 									}

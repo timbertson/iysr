@@ -16,6 +16,8 @@ extern crate hyper;
 extern crate env_logger;
 extern crate schedule_recv;
 extern crate rustc_serialize;
+extern crate glob;
+extern crate regex;
 
 #[macro_use]
 extern crate log;
@@ -28,6 +30,7 @@ mod systemd;
 mod service;
 mod journal;
 mod config;
+mod filter;
 
 pub use monitor::*;
 pub use system_monitor::*;
