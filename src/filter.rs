@@ -1,4 +1,5 @@
 use std::collections::{HashMap,BTreeMap};
+use std::collections::btree_map;
 use std::error::{Error};
 use std::fmt;
 use std::string;
@@ -12,7 +13,26 @@ use std::num::ParseIntError;
 use rustc_serialize::json::{Json,ToJson};
 use rustc_serialize::json;
 use util::*;
+use monitor::Severity;
 use config::{Pattern, Match,FilterCommon,JournalFilter};
+
+const PRIORITY : &'static str = "PRIORITY";
+
+pub fn get_severity(attrs: &JsonMap) -> Option<Severity> {
+	// it is a logic error to call this on a message _before_ JournalFilter::pre_mutate().
+	// Once that has been called, this key is guaranteed to be either absent or a
+	// valid Severity level
+	match attrs.get(PRIORITY) {
+		Some(p) => {
+			let p = match *p {
+				Json::I64(p) => p,
+				_ => panic!("PRIORITY not an int"),
+			};
+			Severity::from_syslog(p).ok()
+		},
+		None => None,
+	}
+}
 
 fn drill<'a>(path: &str, obj: &'a JsonMap) -> Option<&'a str> {
 	//TODO: process a path, not just a single key
@@ -53,33 +73,119 @@ fn matches_common(common: &FilterCommon, id: &str, payload: &JsonMap) -> bool {
 }
 
 pub trait Filter {
-	fn matches(&self, id: &str, payload: &JsonMap) -> bool;
-	fn mutate(&self, x: JsonMap) -> JsonMap;
+	fn matches(&self, id: &str, payload: &mut JsonMap) -> bool;
+	fn pre_mutate(x: &mut JsonMap);
+	fn mutate(&self, x: &mut JsonMap);
+	fn post_mutate(x: &mut JsonMap);
 }
 
 impl Filter for JournalFilter {
-	fn matches(&self, id: &str, payload: &JsonMap) -> bool {
-		matches_common(&self.common, id, &payload)
+
+	// global pre-mutation (for items that may be required by filters)
+	fn pre_mutate(attrs: &mut JsonMap) {
+		// process severity
+		let severity = match attrs.entry(PRIORITY.to_string()) {
+			btree_map::Entry::Vacant(_) => {
+				debug!("Message has no priority");
+				None
+			},
+			btree_map::Entry::Occupied(mut entry) => {
+				let priority = match *entry.get() {
+					Json::String(ref p) => i64::from_str(p).ok(),
+					Json::I64(p) => Some(p),
+					Json::U64(p) => Some(p as i64),
+					_ => None,
+				};
+
+				match priority {
+					None => {
+						debug!("Non-int priority found: {}", entry.get());
+						entry.remove();
+						None
+					},
+					Some(i) => {
+						entry.insert(Json::I64(i));
+						match Severity::from_syslog(i) {
+							Ok(sev) => {
+								Some(sev)
+							},
+							Err(e) => {
+								debug!("{}", e);
+								None
+							},
+						}
+					},
+				}
+			},
+		};
+
+		match severity {
+			None => (),
+			Some(s) => {
+				attrs.insert("SEVERITY".to_string(), Json::String(s.to_string()));
+			}
+		};
 	}
 
-	fn mutate(&self, mut orig: JsonMap) -> JsonMap {
+	fn matches(&self, id: &str, payload: &mut JsonMap) -> bool {
+		if !matches_common(&self.common, id, payload) {
+			return false;
+		}
+		match self.level {
+			None => (),
+			Some(ref target) => {
+				match get_severity(payload) {
+					None => warn!("entry is missing SEVERITY"),
+					Some(lvl) => {
+						trace!("Comparing target level {:?} to {:?}", target, lvl);
+						if lvl < *target {
+							return false;
+						}
+					},
+				}
+			},
+		}
+		true
+	}
+
+	// instance level mutation
+	fn mutate(&self, orig: &mut JsonMap) {
 		match self.attr_extend {
 			Some(ref extra) => orig.extend(extra.clone()),
 			None => (),
-		};
-		orig
+		}
 	}
+
+	// global mutation (only for filtered items)
+	fn post_mutate(attrs: &mut JsonMap) {
+		let mut bad_keys : Vec<String> = Vec::new();
+		for key in attrs.keys() {
+			if key.starts_with('_') {
+				bad_keys.push(key.clone());
+			}
+		}
+
+		for key in bad_keys {
+			attrs.remove(&key);
+		}
+	}
+
 }
 
-pub fn filter<T:Filter>(id: &str, filters: &Vec<T>, payload: JsonMap)
+pub fn filter<T:Filter>(id: &str, filters: &Vec<T>, mut payload: JsonMap)
 	-> Option<JsonMap>
 {
+	T::pre_mutate(&mut payload);
 	if filters.is_empty() {
+		T::post_mutate(&mut payload);
 		return Some(payload);
 	}
-	for filter in filters {
-		if filter.matches(id, &payload) {
-			return Some(filter.mutate(payload))
+
+	for f in filters {
+		if f.matches(id, &mut payload) {
+			f.mutate(&mut payload);
+			T::post_mutate(&mut payload);
+			return Some(payload);
 		}
 	}
 	None

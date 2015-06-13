@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use util::read_all;
 use systemd::RuntimeError;
 use config::{JournalConfig};
-use filter::filter;
+use filter::{filter,get_severity};
 
 type SharedRef<T> = Arc<Mutex<T>>;
 
@@ -25,10 +25,24 @@ pub struct Journal {
 	thread: Option<JoinHandle<Result<(), InternalError>>>,
 }
 
+fn as_string(j: &json::Json) -> Option<String> {
+	match *j {
+		Json::String(ref s) => Some(s.clone()),
+		_ => None,
+	}
+}
+
+fn as_int(j: &json::Json) -> Option<i64> {
+	match *j {
+		Json::I64(s) => Some(s),
+		Json::U64(s) => Some(s as i64),
+		_ => None,
+	}
+}
+
 impl Journal {
 	pub fn new(conf: JournalConfig) -> Result<Journal, InternalError> {
 		// TODO: use backlog
-		// TODO: use common.filters
 		let subscribers = Arc::new(Mutex::new(Vec::new()));
 		let subscribers2 = subscribers.clone();
 		let thread = try!(thread::Builder::new().spawn(move ||
@@ -72,6 +86,7 @@ impl Journal {
 		mut subscribers: SharedRef<Vec<SyncSender<Arc<Update>>>>
 	) -> Result<(), InternalError>
 	{
+		let ref id = config.common.id;
 		loop {
 			match Self::follow_journal(&config, &mut subscribers) {
 				Ok(()) => (),
@@ -81,7 +96,7 @@ impl Journal {
 							id: Some("follow".to_string()),
 							error: format!("failed to follow journal logs: {}", e),
 						}),
-						source: "TODO".to_string(),
+						source: id.clone(),
 						typ: "journal".to_string(),
 						time: Time::now(),
 					}));
@@ -97,32 +112,52 @@ impl Journal {
 		subscribers: &mut SharedRef<Vec<SyncSender<Arc<Update>>>>
 	) -> Result<(), InternalError>
 	{
+		let ref id = config.common.id;
 		let mut child = try!(Self::spawn());
 		let stdout = BufReader::new(try!(child.stdout.take().ok_or(RuntimeError::ChildOutputStreamMissing)));
 		let mut stderr = try!(child.stderr.take().ok_or(RuntimeError::ChildOutputStreamMissing));
+		let source_keys = vec!("_SYSTEMD_UNIT".to_string(), "SYSLOG_IDENTIFIER".to_string());
 
 		let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
 			for line_r in stdout.lines() {
 				let line = try!(line_r);
 				trace!("got journal line: {}", line);
 				let event = match Json::from_str(line.as_str()) {
-					Ok(Json::Object(attrs)) => {
-						filter(&("TODO: id".to_string()), &config.common.filters, attrs).map(|mut attrs| {
+					Ok(Json::Object(mut attrs)) => {
+						let mut source = None;
+						for key in source_keys.iter() {
+							match attrs.get(key) {
+								Some(&Json::String(ref s)) => {
+									source = Some(s.clone());
+									break;
+								},
+								_ => (),
+							}
+						}
+
+						let source = match source {
+							None => "UNKNOWN".to_string(),
+							Some(s) => {
+								attrs.insert("SOURCE".to_string(), Json::String(s.clone()));
+								s
+							}
+						};
+
+						filter(&source, &config.common.filters, attrs).map(|mut attrs| {
 							let message = match attrs.remove("MESSAGE") {
 								Some(Json::String(m)) => Some(m),
 								_ => None,
 							};
 
-							// TODO: filter attribs via config
+							let severity = get_severity(&attrs);
+							
+							// JSON objects are BTreeMap, but we need a HashMap
 							let mut _attrs = HashMap::new();
-							for (k,v) in attrs {
-								if k.starts_with('_') { continue; }
-								_attrs.insert(k,v);
-							}
+							_attrs.extend(attrs);
 
 							Event {
 								id: None,
-								severity: Some(Severity::Warning),
+								severity: severity,
 								message: message,
 								attrs: Arc::new(_attrs),
 							}
@@ -141,7 +176,7 @@ impl Journal {
 					Some(event) => {
 						let update = Arc::new(Update {
 							data: Data::Event(event),
-							source: "TODO".to_string(),
+							source: id.clone(),
 							typ: "journal".to_string(),
 							time: Time::now(),
 						});

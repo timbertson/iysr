@@ -8,6 +8,7 @@ use std::io;
 use std::convert;
 use std::sync::mpsc;
 use std::sync::{Arc};
+use std::cmp::Ordering;
 use rustc_serialize::json::{Json,ToJson};
 use rustc_serialize::json;
 use chrono::{DateTime,UTC};
@@ -31,7 +32,7 @@ macro_rules! enum_json {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug,Eq,PartialEq)]
 pub enum Severity {
 	Emergency,
 	Alert,
@@ -43,8 +44,72 @@ pub enum Severity {
 	Debug,
 }
 
-enum_json!(State);
 enum_json!(Severity);
+
+impl Severity {
+	pub fn to_int(&self) -> i64 {
+		match *self {
+			Severity::Emergency => 0,
+			Severity::Alert => 1,
+			Severity::Critical => 2,
+			Severity::Error => 3,
+			Severity::Warning => 4,
+			Severity::Notice => 5,
+			Severity::Info => 6,
+			Severity::Debug => 7,
+		}
+	}
+
+	pub fn from_syslog(i:i64) -> Result<Severity,InternalError> {
+		match i {
+			0 => Ok(Severity::Emergency),
+			1 => Ok(Severity::Alert),
+			2 => Ok(Severity::Critical),
+			3 => Ok(Severity::Error),
+			4 => Ok(Severity::Warning),
+			5 => Ok(Severity::Notice),
+			6 => Ok(Severity::Info),
+			7 => Ok(Severity::Debug),
+			_ => Err(InternalError::new(format!("Unknown severity: {}", i))),
+		}
+	}
+
+	pub fn to_string(&self) -> String {
+		format!("{:?}", self)
+	}
+
+	fn cmp(&self, other: &Self) -> Ordering {
+		let a = self.to_int();
+		let b = other.to_int();
+		// NOTE: Debug is "less than" emergency in terms of severity, so
+		// we _reverse_ the arguments (because debug is a larger number than alert)
+		b.cmp(&a)
+	}
+}
+
+impl Default for Severity {
+	fn default() -> Self {
+		Severity::Info
+	}
+}
+
+impl PartialOrd for Severity {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for Severity {
+	fn cmp(&self, other: &Self) -> Ordering {
+		let a = self.to_int();
+		let b = other.to_int();
+		// NOTE: Debug is "less than" emergency in terms of severity, so
+		// we _reverse_ the arguments (because debug is a larger number than alert)
+		b.cmp(&a)
+	}
+}
+
+enum_json!(State);
 
 pub type Attributes = HashMap<String, Json>;
 
