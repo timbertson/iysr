@@ -92,12 +92,16 @@ impl ThreadState {
 		*self = f(self._take());
 	}
 
+	// A bit awkward: try_bind function must return threadstate even for an error,
+	// because the borrow checker won't let us keep it in the case of an error!
 	fn try_bind<F, E:Sized>(&mut self, f: F) -> Result<(), E>
-		where F: FnOnce(ThreadState) -> Result<ThreadState,E>
+		where F: FnOnce(ThreadState) -> Result<ThreadState,(ThreadState, E)>
 	{
-		let new = try!(f(self._take()));
-		*self = new;
-		Ok(())
+		let current = self._take();
+		match f(current) {
+			Ok(new) => { *self = new; Ok(()) },
+			Err((new, e)) => { warn!("Error in try_bind"); *self = new; Err(e) },
+		}
 	}
 }
 
@@ -141,6 +145,7 @@ impl Drop for SystemMonitor {
 	fn drop(&mut self) {
 		self.thread_state.bind(|state| match state {
 			ThreadState::Running(t1, t2, resources) => {
+				debug!("Joining system monitor thread");
 				drop(resources);
 				match t1.join() {
 					Ok(Ok(())) => (),
@@ -280,23 +285,56 @@ impl SystemMonitor {
 
 		try!(self.thread_state.try_bind(|state| match state {
 			r@ThreadState::Running(_,_,_) => Ok(r),
-			ThreadState::Ended => Err(InternalError::new("cannot subscribe monitor, it has already ended".to_string())),
+			s@ThreadState::Ended => Err(
+				(s, InternalError::new("cannot subscribe monitor, it has already ended".to_string()))
+			),
 			ThreadState::NotRunning(event_readable, pull_sources) => {
+				// OK, here we go. We need to spawn two threads, and _only_ if they both succeed do we then proceed
+				// to send `event_readable` and `pull_sources` to their respective threads. We can't just let the
+				// threads own these variables, as then we can't return the same NotRunning state in the case of failure.
 				debug!("Starting system monitor thread");
 				let mut subscriptions = Vec::new();
 				for source in push_sources.iter_mut() {
-					subscriptions.push(try!(source.subscribe(event_writable.clone())));
+					match source.subscribe(event_writable.clone()) {
+						Ok(subscription) => {
+							subscriptions.push(subscription);
+						},
+						Err(e) => return Err(
+							(ThreadState::NotRunning(event_readable, pull_sources), InternalError::from(e))
+						),
+					}
 				}
-				let event_writable = event_writable.clone();
-				let listeners = listeners.clone();
-				let poll_last_state = last_state.clone();
-				let push_last_state = last_state.clone();
-				let poll_thread = try!(thread::Builder::new().spawn(move ||
-					Self::poll_loop(sleep_ms, pull_sources, poll_last_state, event_writable)
-				));
-				let event_thread = try!(thread::Builder::new().spawn(move ||
-					Self::run_loop(event_readable, push_last_state, listeners.clone())
-				));
+
+				// kick off the first thread
+				let (t1_send, t1_recv) = mpsc::sync_channel(0);
+				let poll_thread = match thread::Builder::new().spawn(move || {
+					let (pull_sources, last_state, event_writable) = t1_recv.recv().unwrap();
+					Self::poll_loop(sleep_ms, pull_sources, last_state, event_writable)
+				}) {
+					Err(e) => return Err((ThreadState::NotRunning(event_readable, pull_sources), InternalError::from(e))),
+					Ok(poll_thread) => poll_thread
+				};
+
+				// now the second
+				let (t2_send, t2_recv) = mpsc::sync_channel(0);
+				let event_thread = match thread::Builder::new().spawn(move || {
+					let (event_readable, last_state, listeners) = t2_recv.recv().unwrap();
+					Self::run_loop(event_readable, last_state, listeners)
+				}) {
+					Err(e) => {
+						// we spawned the first thread, but not the second!
+						drop(t1_send);
+						drop(t2_send);
+						ignore_error!(poll_thread.join(), "joining thread");
+						return Err((ThreadState::NotRunning(event_readable, pull_sources), InternalError::from(e)))
+					},
+					Ok(event_thread) => event_thread
+				};
+				
+				// Both of the threads are now succesfully started and therefore waiting on our queue.
+				// So `unwap()` is safe, as there's no way those threads could have died.
+				t1_send.send((pull_sources, last_state.clone(), event_writable.clone())).unwrap();
+				t2_send.send((event_readable, last_state.clone(), listeners.clone())).unwrap();
 				Ok(ThreadState::Running(event_thread, poll_thread, subscriptions))
 			}
 		}));
