@@ -82,7 +82,7 @@ impl<T> Drop for Receiver<T> {
 
 enum ThreadState {
 	NotRunning(mpsc::Receiver<Arc<Update>>, Vec<Box<PullDataSource>>),
-	Running(thread::JoinHandle<Result<(),InternalError>>, thread::JoinHandle<()>),
+	Running(thread::JoinHandle<Result<(),InternalError>>, thread::JoinHandle<()>, Vec<Box<PushSubscription>>),
 	Ended,
 }
 
@@ -120,7 +120,8 @@ pub struct SystemMonitor {
 impl Drop for SystemMonitor {
 	fn drop(&mut self) {
 		self.thread_state.bind(|state| match state {
-			ThreadState::Running(t1, t2) => {
+			ThreadState::Running(t1, t2, resources) => {
+				drop(resources);
 				match t1.join() {
 					Ok(Ok(())) => (),
 					Err(e) => log_error!(e, "joining thread"),
@@ -264,12 +265,13 @@ impl SystemMonitor {
 		let sleep_ms = self.poll_time_ms;
 
 		try!(self.thread_state.try_bind(|state| match state {
-			r@ThreadState::Running(_,_) => Ok(r),
+			r@ThreadState::Running(_,_,_) => Ok(r),
 			ThreadState::Ended => Err(InternalError::new("cannot subscribe monitor, it has already ended".to_string())),
 			ThreadState::NotRunning(event_readable, pull_sources) => {
 				debug!("Starting system monitor thread");
+				let mut subscriptions = Vec::new();
 				for source in push_sources.iter_mut() {
-					try!(source.subscribe(event_writable.clone()));
+					subscriptions.push(try!(source.subscribe(event_writable.clone())));
 				}
 				let event_writable = event_writable.clone();
 				let listeners = listeners.clone();
@@ -281,7 +283,7 @@ impl SystemMonitor {
 				let event_thread = try!(thread::Builder::new().spawn(move ||
 					Self::run_loop(event_readable, listeners.clone())
 				));
-				Ok(ThreadState::Running(event_thread, poll_thread))
+				Ok(ThreadState::Running(event_thread, poll_thread, subscriptions))
 			}
 		}));
 		Ok(rv)

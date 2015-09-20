@@ -32,7 +32,7 @@ macro_rules! enum_json {
 	}
 }
 
-#[derive(Debug,Eq,PartialEq)]
+#[derive(Debug,Eq,PartialEq,Clone)]
 pub enum Severity {
 	Emergency,
 	Alert,
@@ -371,6 +371,9 @@ pub trait PullDataSource: Send + Sync {
 	fn poll(&self) -> Result<Data, InternalError>;
 }
 
+pub trait PushSubscription : Send {
+}
+
 pub trait PushDataSource: Send + Sync {
-	fn subscribe(&mut self, mpsc::SyncSender<Arc<Update>>) -> Result<(), InternalError>;
+	fn subscribe(&self, mpsc::SyncSender<Arc<Update>>) -> Result<Box<PushSubscription>, InternalError>;
 }

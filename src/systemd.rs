@@ -50,10 +50,11 @@ pub struct SystemdPoller {
 	id: String,
 }
 
-pub struct SystemdDbusListener {
-	ignored_types: HashSet<String>,
-	user: bool,
-	id: String,
+pub struct SystemdDbusSubscription {
+	connection: ()
+}
+
+impl PushSubscription for SystemdDbusSubscription {
 }
 
 pub struct SystemdPusher {
@@ -97,40 +98,11 @@ impl SystemdMonitor {
 			id: self.id.clone(),
 		})
 	}
-
-	pub fn dbus_listener(&self) -> Box<SystemdDbusListener> {
-		Box::new(SystemdDbusListener {
-			ignored_types: self.ignored_types.clone(),
-			user: self.user,
-			id: self.id.clone(),
-		})
-	}
 }
 
 const SYSTEMD_DBUS_PATH: &'static str = "/org/freedesktop/systemd1";
 const SYSTEMD_DBUS_DEST: &'static str = "org.freedesktop.systemd1";
 const SYSTEMD_DBUS_IFACE: &'static str = "org.freedesktop.systemd1.Manager";
-
-impl PushDataSource for SystemdDbusListener {
-	fn subscribe(&mut self, _receiver: mpsc::SyncSender<Arc<Update>>) -> Result<(), InternalError> {
-		let which = if self.user { BusType::Session } else { BusType::System };
-		debug!("Connecting to {:?} bus", which);
-		let conn = try!(Connection::get_private(which));
-
-		let msg = try!(
-			Message::new_method_call(SYSTEMD_DBUS_DEST, SYSTEMD_DBUS_PATH, SYSTEMD_DBUS_IFACE, "Subscribe")
-			.ok_or(InternalError::new(format!("Failed to create method call")))
-		);
-
-		debug!("Subscribing to {}", SYSTEMD_DBUS_DEST);
-		let response = try!(conn.send_with_reply_and_block(msg, 2000));
-		let reply = response.get_items();
-		println!("DBUS REPLY: {:?}", reply);
-		// let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
-		// 	for line_r in stdout.lines() {
-		Ok(())
-	}
-}
 
 impl SystemdPoller {
 	fn common_args<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
@@ -374,10 +346,31 @@ impl PullDataSource for SystemdPoller {
 	}
 }
 
-impl PushDataSource for SystemdPusher {
-	fn subscribe(&mut self, _receiver: mpsc::SyncSender<Arc<Update>>) -> Result<(), InternalError> {
-		warn!("unimplemented");
-		Ok(())
-		//unimplemented!()
+impl Drop for SystemdDbusSubscription {
+	fn drop(&mut self) {
+		unimplemented!()
 	}
+}
+
+impl PushDataSource for SystemdPusher {
+	fn subscribe(&self, _receiver: mpsc::SyncSender<Arc<Update>>) -> Result<Box<PushSubscription>, InternalError> {
+		let which = if self.user { BusType::Session } else { BusType::System };
+		debug!("Connecting to {:?} bus", which);
+		let conn = try!(Connection::get_private(which));
+
+		let msg = try!(
+			Message::new_method_call(SYSTEMD_DBUS_DEST, SYSTEMD_DBUS_PATH, SYSTEMD_DBUS_IFACE, "Subscribe")
+				.ok_or(InternalError::new(format!("Failed to create method call")))
+		);
+
+		debug!("Subscribing to {}", SYSTEMD_DBUS_DEST);
+		let response = try!(conn.send_with_reply_and_block(msg, 2000));
+		let reply = response.get_items();
+		println!("DBUS REPLY: {:?}", reply);
+		// let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
+		// 	for line_r in stdout.lines() {
+		Ok(Box::new(SystemdDbusSubscription { connection: (), }))
+
+	}
+
 }

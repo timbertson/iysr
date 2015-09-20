@@ -21,8 +21,7 @@ use filter::{filter,get_severity};
 type SharedRef<T> = Arc<Mutex<T>>;
 
 pub struct Journal {
-	subscribers: SharedRef<Vec<SyncSender<Arc<Update>>>>,
-	thread: Option<JoinHandle<Result<(), InternalError>>>,
+	config: JournalConfig,
 }
 
 fn as_string(j: &json::Json) -> Option<String> {
@@ -41,17 +40,9 @@ fn as_int(j: &json::Json) -> Option<i64> {
 }
 
 impl Journal {
-	pub fn new(conf: JournalConfig) -> Result<Journal, InternalError> {
+	pub fn new(config: JournalConfig) -> Result<Journal, InternalError> {
 		// TODO: use backlog
-		let subscribers = Arc::new(Mutex::new(Vec::new()));
-		let subscribers2 = subscribers.clone();
-		let thread = try!(thread::Builder::new().spawn(move ||
-			Self::run_thread(conf, subscribers)
-		));
-		Ok(Journal {
-			subscribers: subscribers2,
-			thread: Some(thread),
-		})
+		Ok(Journal { config: config })
 	}
 
 	fn spawn() -> Result<Child, InternalError> {
@@ -71,27 +62,25 @@ impl Journal {
 	}
 
 	fn send_update(
-		subscribers: &mut SharedRef<Vec<SyncSender<Arc<Update>>>>,
+		subscriber: &SyncSender<Arc<Update>>,
 		update: Arc<Update>)
 	{
-		for sub in subscribers.lock().unwrap().iter() {
-			// TODO: don't lock this on every event; collect a
-			// number of events
-			ignore_error!(sub.try_send(update.clone()), "sending event");
-		}
+		ignore_error!(subscriber.try_send(update), "sending event");
 	}
 
 	fn run_thread(
 		config: JournalConfig,
-		mut subscribers: SharedRef<Vec<SyncSender<Arc<Update>>>>
+		subscriber: SyncSender<Arc<Update>>
 	) -> Result<(), InternalError>
 	{
 		let ref id = config.common.id;
+		let subscriber = Arc::new(Mutex::new(subscriber));
 		loop {
-			match Self::follow_journal(&config, &mut subscribers) {
+			match Self::follow_journal(&config, &subscriber) {
 				Ok(()) => (),
 				Err(e) => {
-					Self::send_update(&mut subscribers, Arc::new(Update {
+					let subscriber = subscriber.lock().unwrap();
+					Self::send_update(&subscriber, Arc::new(Update {
 						data: Data::Error(Failure {
 							id: Some("follow".to_string()),
 							error: format!("failed to follow journal logs: {}", e),
@@ -109,7 +98,7 @@ impl Journal {
 
 	fn follow_journal(
 		config: &JournalConfig,
-		subscribers: &mut SharedRef<Vec<SyncSender<Arc<Update>>>>
+		subscriber: &Arc<Mutex<SyncSender<Arc<Update>>>>
 	) -> Result<(), InternalError>
 	{
 		let ref id = config.common.id;
@@ -119,6 +108,7 @@ impl Journal {
 		let source_keys = vec!("_SYSTEMD_UNIT".to_string(), "SYSLOG_IDENTIFIER".to_string());
 
 		let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
+			let subscriber = subscriber.lock().unwrap();
 			for line_r in stdout.lines() {
 				let line = try!(line_r);
 				trace!("got journal line: {}", line);
@@ -180,7 +170,7 @@ impl Journal {
 							typ: "journal".to_string(),
 							time: Time::now(),
 						});
-						Self::send_update(subscribers, update);
+						Self::send_update(&subscriber, update);
 					},
 					None => {
 						trace!("item filtered");
@@ -204,25 +194,35 @@ impl Journal {
 	}
 }
 
-impl Drop for Journal {
+
+pub struct JournalSubscription {
+	thread: Option<JoinHandle<Result<(), InternalError>>>,
+}
+impl Drop for JournalSubscription {
 	fn drop(&mut self) {
+		// XXX kill child process
 		match self.thread.take() {
-			Some(t) => match t.join() {
-				Ok(Ok(())) => (),
-				Err(e) => log_error!(e, "joining thread"),
-				Ok(Err(e)) => log_error!(e, "joining thread"),
-			},
 			None => (),
+			Some(thread) => {
+				match thread.join() {
+					Ok(Ok(())) => (),
+					Err(e) => log_error!(e, "joining thread"),
+					Ok(Err(e)) => log_error!(e, "joining thread"),
+				}
+			}
 		}
-		//let _ = self.thread.join();
 	}
 }
 
+impl PushSubscription for JournalSubscription {
+}
 
 impl PushDataSource for Journal {
-	fn subscribe(&mut self, subscriber: SyncSender<Arc<Update>>) -> Result<(), InternalError> {
-		let mut subscribers = self.subscribers.lock().unwrap();
-		subscribers.push(subscriber);
-		Ok(())
+	fn subscribe(&self, subscriber: SyncSender<Arc<Update>>) -> Result<Box<PushSubscription>, InternalError> {
+		let config = self.config.clone();
+		let thread = try!(thread::Builder::new().spawn(move ||
+			Self::run_thread(config, subscriber)
+		));
+		Ok(Box::new(JournalSubscription { thread: Some(thread) }))
 	}
 }

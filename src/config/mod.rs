@@ -24,12 +24,14 @@ pub use config::error::*;
 
 use config::internal::*;
 
+#[derive(Clone)]
 pub enum Pattern {
 	Glob(::glob::Pattern),
 	Regex(Regex),
 	Literal(String),
 }
 
+#[derive(Clone)]
 pub struct Match {
 	pub attr: Option<String>,
 	pub pattern: Pattern,
@@ -39,7 +41,16 @@ pub struct CommonConfig<T> {
 	pub filters: Vec<T>,
 	pub id:String,
 }
+impl<T:Clone> Clone for CommonConfig<T> {
+	fn clone(&self) -> CommonConfig<T> {
+		CommonConfig {
+			filters: self.filters.clone(),
+			id: self.id.clone(),
+		}
+	}
+}
 
+#[derive(Clone)]
 pub struct FilterCommon {
 	pub include: Vec<Match>,
 	pub exclude: Vec<Match>,
@@ -92,11 +103,13 @@ impl FilterCommon {
 	}
 }
 
+#[derive(Clone)]
 pub struct JournalConfig {
 	pub common: CommonConfig<JournalFilter>,
 	pub backlog: Option<i32>,
 }
 
+#[derive(Clone)]
 pub struct JournalFilter {
 	pub common: FilterCommon,
 	pub level: Option<Severity>,

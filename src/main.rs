@@ -52,15 +52,15 @@ fn load_config(filename: String) -> Result<Config, ConfigError> {
 }
 
 fn run(config: Config) -> Result<(), InternalError> {
-	let mut pull_sources : Vec<Box<PullDataSource>> = Vec::new();
+	let pull_sources : Vec<Box<PullDataSource>> = Vec::new();
 	let mut push_sources : Vec<Box<PushDataSource>> = Vec::new();
 
 	for module in config.sources {
 		match module {
 			SourceConfig::Systemd(conf) => {
 				let systemd = SystemdMonitor::new(conf);
-				pull_sources.push(systemd.poller());
-				push_sources.push(systemd.dbus_listener());
+				// pull_sources.push(systemd.poller());
+				push_sources.push(systemd.pusher());
 			},
 			SourceConfig::Journal(conf) => {
 				let journal = try!(Journal::new(conf));
