@@ -11,6 +11,7 @@ log = "*"
 env_logger = "*"
 schedule_recv = "*"
 tojson_macros = "*"
+dbus = "*"
 
 # server
 hyper = "*"

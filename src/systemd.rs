@@ -12,6 +12,8 @@ use chrono::{DateTime,Local};
 use monitor::*;
 use config::SystemdConfig;
 use util::read_all;
+use dbus::{Connection,BusType,Message};
+extern crate dbus;
 
 const MAX_EXECV_ARGLEN : usize = 4096; // conservative, actually much higher on most linux systems
 
@@ -29,6 +31,13 @@ impl convert::From<RuntimeError> for InternalError {
 	}
 }
 
+impl convert::From<dbus::Error> for InternalError {
+	fn from(err: dbus::Error) -> InternalError {
+		// TODO: nice error messages
+		InternalError::new(format!("{:?}", err))
+	}
+}
+
 pub struct SystemdMonitor {
 	ignored_types: HashSet<String>,
 	user: bool,
@@ -36,6 +45,12 @@ pub struct SystemdMonitor {
 }
 
 pub struct SystemdPoller {
+	ignored_types: HashSet<String>,
+	user: bool,
+	id: String,
+}
+
+pub struct SystemdDbusListener {
 	ignored_types: HashSet<String>,
 	user: bool,
 	id: String,
@@ -81,6 +96,39 @@ impl SystemdMonitor {
 			user: self.user,
 			id: self.id.clone(),
 		})
+	}
+
+	pub fn dbus_listener(&self) -> Box<SystemdDbusListener> {
+		Box::new(SystemdDbusListener {
+			ignored_types: self.ignored_types.clone(),
+			user: self.user,
+			id: self.id.clone(),
+		})
+	}
+}
+
+const SYSTEMD_DBUS_PATH: &'static str = "/org/freedesktop/systemd1";
+const SYSTEMD_DBUS_DEST: &'static str = "org.freedesktop.systemd1";
+const SYSTEMD_DBUS_IFACE: &'static str = "org.freedesktop.systemd1.Manager";
+
+impl PushDataSource for SystemdDbusListener {
+	fn subscribe(&mut self, _receiver: mpsc::SyncSender<Arc<Update>>) -> Result<(), InternalError> {
+		let which = if self.user { BusType::Session } else { BusType::System };
+		debug!("Connecting to {:?} bus", which);
+		let conn = try!(Connection::get_private(which));
+
+		let msg = try!(
+			Message::new_method_call(SYSTEMD_DBUS_DEST, SYSTEMD_DBUS_PATH, SYSTEMD_DBUS_IFACE, "Subscribe")
+			.ok_or(InternalError::new(format!("Failed to create method call")))
+		);
+
+		debug!("Subscribing to {}", SYSTEMD_DBUS_DEST);
+		let response = try!(conn.send_with_reply_and_block(msg, 2000));
+		let reply = response.get_items();
+		println!("DBUS REPLY: {:?}", reply);
+		// let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
+		// 	for line_r in stdout.lines() {
+		Ok(())
 	}
 }
 

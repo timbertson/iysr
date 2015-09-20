@@ -18,6 +18,7 @@ extern crate schedule_recv;
 extern crate rustc_serialize;
 extern crate glob;
 extern crate regex;
+extern crate dbus;
 
 #[macro_use]
 extern crate log;
@@ -59,6 +60,7 @@ fn run(config: Config) -> Result<(), InternalError> {
 			SourceConfig::Systemd(conf) => {
 				let systemd = SystemdMonitor::new(conf);
 				pull_sources.push(systemd.poller());
+				push_sources.push(systemd.dbus_listener());
 			},
 			SourceConfig::Journal(conf) => {
 				let journal = try!(Journal::new(conf));
