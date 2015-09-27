@@ -11,6 +11,7 @@ use std::mem;
 use std::error::Error;
 use std::ops::Deref;
 use monitor::*;
+use errors::*;
 use rustc_serialize::{Encoder,Encodable};
 use rustc_serialize::json;
 use rustc_serialize::json::{Json,ToJson};

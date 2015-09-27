@@ -2,6 +2,7 @@ use std::io;
 use std::collections::{BTreeMap};
 use rustc_serialize::json::{Json};
 use monitor::*;
+use errors::*;
 
 macro_rules! log_error {
 	($e:expr, $m:expr) => (

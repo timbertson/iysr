@@ -12,9 +12,10 @@ use rustc_serialize::json;
 use rustc_serialize::json::{Json};
 use chrono::{DateTime,Local};
 use monitor::*;
+use super::errors::*;
 use std::thread::JoinHandle;
 use util::read_all;
-use systemd::RuntimeError;
+use systemd_common::RuntimeError;
 use config::{JournalConfig};
 use filter::{filter,get_severity};
 

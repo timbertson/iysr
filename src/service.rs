@@ -5,7 +5,8 @@ use std::io::{Write};
 use std::collections::BTreeMap;
 use std::sync::{Arc,Mutex};
 
-use monitor::{InternalError,Update};
+use super::errors::InternalError;
+use super::monitor::{Update};
 use system_monitor::{SystemMonitor,Receiver};
 use hyper::server::{Request,Response,Handler};
 use hyper::net::{Fresh,Streaming};

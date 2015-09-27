@@ -4,6 +4,7 @@
 #![feature(collections_drain)]
 #![feature(std_misc)]
 #![feature(custom_derive, plugin)]
+#![feature(slice_patterns)]
 
 #![plugin(tojson_macros)]
 
@@ -25,9 +26,16 @@ extern crate log;
 
 #[macro_use]
 mod util;
+
+#[macro_use]
+mod errors;
+
 mod monitor;
 mod system_monitor;
 mod systemd;
+mod systemd_common;
+mod systemd_dbus;
+mod systemd_subprocess;
 mod service;
 mod journal;
 mod config;
@@ -51,7 +59,7 @@ fn load_config(filename: String) -> Result<Config, ConfigError> {
 	Config::load(&mut file)
 }
 
-fn run(config: Config) -> Result<(), InternalError> {
+fn run(config: Config) -> Result<(), errors::InternalError> {
 	let pull_sources : Vec<Box<PullDataSource>> = Vec::new();
 	let mut push_sources : Vec<Box<PushDataSource>> = Vec::new();
 
