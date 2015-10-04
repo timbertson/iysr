@@ -246,13 +246,16 @@ impl SystemdPoller {
 	}
 }
 
-impl PullDataSource for SystemdPoller {
+impl DataSource for SystemdPoller {
 	fn typ(&self) -> String {
 		return String::from_str(SYSTEMD_ID);
 	}
 	fn id(&self) -> String {
 		self.id.clone()
 	}
+}
+
+impl PullDataSource for SystemdPoller {
 	fn poll(&self) -> Result<Data, InternalError> {
 		let mut child = try!(self.spawn());
 		let state = try!(self.parse(&mut child));

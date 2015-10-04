@@ -72,14 +72,19 @@ impl SystemdMonitor {
 	}
 }
 
+impl DataSource for SystemdPusher {
+	fn id(&self) -> String { self.id.clone() }
+	fn typ(&self) -> String { "systemd".to_string() }
+}
 
 impl PushDataSource for SystemdPusher {
 	fn subscribe(&self, sender: mpsc::SyncSender<Arc<Update>>) -> Result<Box<PushSubscription>, InternalError> {
 		let which = if self.user { BusType::Session } else { BusType::System };
 		let ignored_types = self.ignored_types.clone();
 
+		let error_reporter = ErrorReporter::new(self);
 		let thread = try!(thread::Builder::new().spawn(move|| -> Result<(), InternalError> {
-			let rv = watch_units(&sender, which, ignored_types);
+			let rv = watch_units(&sender, which, ignored_types, error_reporter);
 			match rv {
 				Ok(()) => Ok(()),
 				Err(e) => {

@@ -32,4 +32,3 @@ pub fn read_all(source: &mut io::Read) -> Result<String, InternalError> {
 	try!(source.read_to_end(&mut buf));
 	Ok(try!(String::from_utf8(buf)))
 }
-

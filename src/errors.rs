@@ -67,9 +67,13 @@ coerce_to_internal_error!(
 coerce_to_internal_error!(
 	  generic(mpsc::SendError<T>, T)
 );
+coerce_to_internal_error!(
+	  generic(mpsc::TrySendError<T>, T)
+);
 
 impl Error for InternalError {
 	fn description(&self) -> &str {
 		self.reason.as_str()
 	}
 }
+

@@ -306,9 +306,12 @@ impl ToJson for Update {
 	}
 }
 
-pub trait PullDataSource: Send + Sync {
+pub trait DataSource: Send + Sync {
 	fn id(&self) -> String;
 	fn typ(&self) -> String;
+}
+
+pub trait PullDataSource: Send + Sync + DataSource {
 	fn poll(&self) -> Result<Data, InternalError>;
 }
 
@@ -318,3 +321,54 @@ pub trait PushSubscription : Send {
 pub trait PushDataSource: Send + Sync {
 	fn subscribe(&self, mpsc::SyncSender<Arc<Update>>) -> Result<Box<PushSubscription>, InternalError>;
 }
+
+pub struct ErrorReporter {
+	id: String,
+	typ: String,
+}
+
+impl ErrorReporter {
+	pub fn new(src: &DataSource) -> ErrorReporter {
+		ErrorReporter {
+			id: src.id(),
+			typ: src.typ(),
+		}
+	}
+
+	pub fn process_error<T:Error>(&self, emitter: &mpsc::SyncSender<Arc<Update>>, error_msg: &str, res: Result<(), T>) -> Result<Result<(), T>,InternalError> {
+		match res {
+			Ok(()) => Ok(Ok(())),
+			Err(e) => {
+				try!(emitter.try_send(Arc::new(Update {
+					data: Data::Error(Failure {
+						id: None,
+						error: format!("Error {}: {}", error_msg, e),
+					}),
+					source: self.id.clone(),
+					typ: self.typ.clone(),
+					time: Time::now(),
+				})));
+				Ok(Err(e)) // we successfully reported an error. So the emitter is OK, but the underlying process failed.
+			}
+		}
+	}
+
+	// like `sender.send`, but with error reporting
+	pub fn report_fatal<T:Error+convert::Into<InternalError>>(&self, emitter: &mpsc::SyncSender<Arc<Update>>, error_msg: &str, res: Result<(), T>) -> Result<(),InternalError> {
+		match self.process_error(emitter, error_msg, res) {
+			Ok(Ok(())) => Ok(()),
+			Ok(Err(e)) => Err(e.into()),
+			Err(e) => Err(e),
+		}
+	}
+
+	pub fn report_recoverable<T:Error>(&self, emitter: &mpsc::SyncSender<Arc<Update>>, error_msg: &str, res: Result<(), T>) -> Result<(), InternalError> {
+		match self.process_error(emitter, error_msg, res) {
+			// ignore Ok(Err(e)), the inner error is recoverable
+			Ok(_) => Ok(()),
+			// if the emitter is failed, this still fails
+			Err(e) => Err(e),
+		}
+	}
+}
+
