@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::process::{Command,Stdio,Child};
 use std::thread;
-use std::thread::{JoinHandle,JoinGuard};
+use std::thread::{JoinHandle};
 use std::char;
 use std::io;
 use std::convert;

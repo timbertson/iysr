@@ -25,7 +25,7 @@ impl InternalError {
 	}
 
 	pub fn wrap(err: &Error) -> InternalError {
-		InternalError { reason: String::from_str(err.description()) }
+		InternalError { reason: err.description().to_string() }
 	}
 }
 

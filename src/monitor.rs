@@ -179,7 +179,7 @@ impl ToJson for Duration {
 		let mut attrs = BTreeMap::new();
 		match *self {
 			Duration(d) => {
-				attrs.insert(String::from_str("ms"), Json::I64(d.num_milliseconds()));
+				attrs.insert("ms".to_string(), Json::I64(d.num_milliseconds()));
 			}
 		}
 		Json::Object(attrs)
