@@ -25,6 +25,10 @@ macro_rules! errln {
 	)
 }
 
+macro_rules! encode_sub {
+	($x:expr) => { {|s| $x.encode(s) } }
+}
+
 pub type JsonMap = BTreeMap<String,Json>;
 
 pub fn read_all(source: &mut io::Read) -> Result<String, InternalError> {

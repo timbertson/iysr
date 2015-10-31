@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::sync::{Arc};
 use std::str::FromStr;
 use std::num::ParseIntError;
-use rustc_serialize::json::{Json,ToJson};
+use rustc_serialize::json::Json;
 use rustc_serialize::json;
 use chrono::{Duration};
 use monitor::Severity;
@@ -147,7 +147,7 @@ impl ConfigCheck {
 		} else {
 			let keys : Vec<String> = attrs.keys().cloned().collect();
 			Err(ConfigError::new(format!(
-				"Unused config key(s): {}", keys.as_slice().connect(", ")
+				"Unused config key(s): {}", keys.join(", ")
 			)))
 		};
 

@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::{Arc};
 use std::str::FromStr;
 use std::num::ParseIntError;
-use rustc_serialize::json::{Json,ToJson};
+use rustc_serialize::json::Json;
 use rustc_serialize::json;
 use util::*;
 use monitor::Severity;
@@ -37,7 +37,7 @@ pub fn get_severity(attrs: &JsonMap) -> Option<Severity> {
 fn drill<'a>(path: &str, obj: &'a JsonMap) -> Option<&'a str> {
 	//TODO: process a path, not just a single key
 	match obj.get(path) {
-		Some(&Json::String(ref s)) => Some(s.as_str()),
+		Some(&Json::String(ref s)) => Some(s.deref()),
 		// note: we're silently ignoring non-string attributes
 		_ => None,
 		}
@@ -53,7 +53,7 @@ fn test(s: &str, pat: &Pattern) -> bool {
 
 fn test_match(m: &Match, id: &str, attribs: &JsonMap) -> bool {
 	let subject = match m.attr {
-		Some(ref attr) => drill(attr.as_str(), attribs),
+		Some(ref attr) => drill(attr.deref(), attribs),
 		None => Some(id),
 	};
 	match subject {

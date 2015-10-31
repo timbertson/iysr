@@ -3,8 +3,10 @@ use std::process::{Command,Stdio,Child};
 use std::thread;
 use std::thread::{JoinHandle};
 use std::char;
+use std::ops::Deref;
 use std::io;
 use std::convert;
+use std::hash;
 use std::error::{Error};
 use std::sync::mpsc;
 use std::sync::{Arc};
@@ -15,7 +17,7 @@ use chrono::{DateTime,Local};
 use monitor::*;
 use config::SystemdConfig;
 use util::read_all;
-use dbus::{Connection,BusType,Message,MessageItem,MessageType,Props,ConnectionItem};
+use dbus::{Connection,BusType,Message,MessageItem,MessageType,Props,ConnectionItem,Path};
 use super::errors::*;
 use super::systemd_common::*;
 extern crate dbus;
@@ -35,9 +37,17 @@ const UNIT_REMOVED: &'static str = "UnitRemoved";
 const PROPERTIES_CHANGED: &'static str = "PropertiesChanged";
 
 
+fn safe_remove<T>(vec: &mut Vec<T>, idx: usize) -> Option<T> {
+	if vec.len() > idx {
+		Some(vec.remove(idx))
+	} else {
+		None
+	}
+}
+
 fn method_call(name: &str) -> Result<Message,InternalError> {
 		Message::new_method_call(SYSTEMD_DBUS_DEST, SYSTEMD_DBUS_PATH, SYSTEMD_MANAGER_IFACE, name)
-			.ok_or(InternalError::new(format!("Failed to create method call")))
+			.or(Err(InternalError::new(format!("Failed to create method call"))))
 }
 
 fn call_method(conn: &Connection, call: Message) -> Result<Message, dbus::Error> {
@@ -55,7 +65,7 @@ fn matchable_headers<'a>(
 	-> (MessageType, Option<&'a str>, Option<&'a str>, Option<&'a str>)
 {
 	fn conv<'a>(o: &'a Option<String>) -> Option<&'a str> {
-		o.as_ref().map(|x| x.as_str())
+		o.as_ref().map(|x| x.deref())
 	}
 	match *headers {
 		(typ, ref path, ref iface, ref name) =>
@@ -80,9 +90,9 @@ pub fn watch_units(
 
 	// let _msgid_list_units = conn.send(try!(method_call("ListUnits")));
 	// TODO: use these
-	try!(conn.add_match(match_rule("UnitNew", None).as_str()));
-	try!(conn.add_match(match_rule("UnitRemoved", None).as_str()));
-	try!(conn.add_match(match_rule("Reloading", None).as_str()));
+	try!(conn.add_match(match_rule("UnitNew", None).deref()));
+	try!(conn.add_match(match_rule("UnitRemoved", None).deref()));
+	try!(conn.add_match(match_rule("Reloading", None).deref()));
 
 	let unit_listing = try!(conn.send_with_reply_and_block(try!(method_call("ListUnits")), DBUS_CALL_TIMEOUT));
 
@@ -180,6 +190,7 @@ struct DBusState<'a> {
 	sender: &'a mpsc::SyncSender<Arc<Update>>,
 	ignored_types: &'a HashSet<String>,
 	error_reporter: ErrorReporter,
+	// XXX these should be keyed as `Path`, but that's not hashable
 	units: HashMap<String,DBusUnit>,
 	state: HashMap<String,Status>,
 }
@@ -213,36 +224,29 @@ impl<'a> DBusState<'a> {
 		}
 
 		match item {
-			Struct(values) => {
-				match values.as_slice() {
+			Struct(mut values) => {
+				// XXX this would be much nicer with destructuring
+				let unit_path = safe_remove(&mut values, 6);
+				let unit_name = safe_remove(&mut values, 0);
+				match (unit_name, unit_path) {
 					// XXX can we do this without the `ref` and later `copy()`?
-					[
+					(
 						// The primary unit name as string
-						Str(ref unit_name),
+						Some(Str(ref unit_name)),
 
 						// The human readable description string
-						_,
-
 						// The load state (i.e. whether the unit file has been loaded successfully)
-						_,
-
 						// The active state (i.e. whether the unit is currently started or not)
-						_,
-
 						// The sub state (a more fine-grained version of the active state that is specific to the unit type, which the active state is not)
-						_,
-
 						// A unit that is being followed in its state by this unit, if there is any, otherwise the empty string.
-						_,
-
+						
 						// The unit object path
-						ObjectPath(ref unit_path),
+						Some(ObjectPath(ref unit_path)),
 
 						// If there is a job queued for the job unit the numeric job id, 0 otherwise
 						// The job type as string
 						// The job object path
-						..
-					] => {
+					) => {
 						try!(self.add_unit(unit_name, unit_path));
 						Ok(())
 					},
@@ -257,7 +261,7 @@ impl<'a> DBusState<'a> {
 	fn get_unit_status(&mut self, path: &String) -> Result<Status, InternalError> {
 		use dbus::MessageItem::*;
 		let active_state = match try!(get_unit_prop(self.conn, path, "ActiveState")) {
-			Str(s) => state_of_active_state(s.as_str()),
+			Str(s) => state_of_active_state(s.deref()),
 			other => return Err(InternalError::new(format!("Invalid ActiveState: {:?}", other))),
 		};
 
@@ -304,21 +308,25 @@ impl<'a> DBusState<'a> {
 		self.emit()
 	}
 
-	fn add_unit(&mut self, name: &String, path: &String) -> Result<(),InternalError> {
+	fn add_unit(&mut self, name: &String, path: &Path) -> Result<(),InternalError> {
+		let _path = path.to_string();
+		let path = &_path;
 		if self.units.contains_key(path) || try!(should_ignore_unit(self.ignored_types, name)) {
 			return Ok(())
 		}
 
 		debug!("Adding unit {} with path {}", name, path);
 
-		try!(self.conn.add_match(property_match_rule(path).as_str()));
+		try!(self.conn.add_match(property_match_rule(path).deref()));
 		let status = try!(self.get_unit_status(path));
 		let unit = DBusUnit { status: status, name: name.clone(), path: path.clone() };
 		self._update_unit(unit);
 		Ok(())
 	}
 
-	fn remove_unit(&mut self, path: &String) -> Result<(),InternalError> {
+	fn remove_unit(&mut self, path: &Path) -> Result<(),InternalError> {
+		let _path = path.to_string();
+		let path = &_path;
 		match self.units.remove(path) {
 			None => {
 				debug!("Remove_unit saw unknown path {}", path);
@@ -326,7 +334,7 @@ impl<'a> DBusState<'a> {
 			},
 			Some(unit) => {
 				debug!("Removing unit {}", unit.name);
-				let _:Option<Status> = self.state.remove(unit.name.as_str());
+				let _:Option<Status> = self.state.remove(unit.name.deref());
 				self.emit()
 			},
 		}
@@ -353,14 +361,16 @@ impl<'a> DBusState<'a> {
 				let headers = msg.headers();
 				match matchable_headers(&headers) {
 					(MessageType::Signal, Some(SYSTEMD_DBUS_PATH), Some(SYSTEMD_MANAGER_IFACE), signal_name) => {
-						let items = msg.get_items();
-						let unit_id = match items.as_slice() {
-							[Str(ref name), ObjectPath(ref path), ..] => Some((name, path)),
+						let mut items = msg.get_items();
+						let path = safe_remove(&mut items, 1);
+						let name = safe_remove(&mut items, 0);
+						let unit_id = match (name, path) {
+							(Some(Str(name)), Some(ObjectPath(path))) => Some((name, path)),
 							_ => None,
 						};
 						match (signal_name, unit_id) {
-							(Some(UNIT_ADDED), Some((name, path))) => (self.add_unit(name, path)),
-							(Some(UNIT_REMOVED), Some((_name, path))) => (self.remove_unit(path)),
+							(Some(UNIT_ADDED), Some((name, path))) => (self.add_unit(&name, &path)),
+							(Some(UNIT_REMOVED), Some((_name, path))) => (self.remove_unit(&path)),
 							other => unexpected_message(&other),
 						}
 					},

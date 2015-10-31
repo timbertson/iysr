@@ -4,6 +4,7 @@ use std::thread;
 use std::char;
 use std::io;
 use std::convert;
+use std::ops::Deref;
 use std::sync::mpsc;
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc,Mutex};
@@ -18,6 +19,7 @@ use util::read_all;
 use systemd_common::RuntimeError;
 use config::{JournalConfig};
 use filter::{filter,get_severity};
+extern crate thread_scoped;
 
 type SharedRef<T> = Arc<Mutex<T>>;
 
@@ -102,96 +104,101 @@ impl Journal {
 		subscriber: &Arc<Mutex<SyncSender<Arc<Update>>>>
 	) -> Result<(), InternalError>
 	{
-		let ref id = config.common.id;
+		let id = config.common.id.clone();
 		let mut child = try!(Self::spawn());
 		let stdout = BufReader::new(try!(child.stdout.take().ok_or(RuntimeError::ChildOutputStreamMissing)));
 		let mut stderr = try!(child.stderr.take().ok_or(RuntimeError::ChildOutputStreamMissing));
 		let source_keys = vec!("_SYSTEMD_UNIT".to_string(), "SYSLOG_IDENTIFIER".to_string());
 
-		let ok_t = try!(thread::Builder::new().scoped(move|| -> Result<(), InternalError> {
-			let subscriber = subscriber.lock().unwrap();
-			for line_r in stdout.lines() {
-				let line = try!(line_r);
-				trace!("got journal line: {}", line);
-				let event = match Json::from_str(line.as_str()) {
-					Ok(Json::Object(mut attrs)) => {
-						let mut source = None;
-						for key in source_keys.iter() {
-							match attrs.get(key) {
-								Some(&Json::String(ref s)) => {
-									source = Some(s.clone());
-									break;
-								},
-								_ => (),
+		unsafe {
+			// XXX move to thread builder which fails rather than panicking (rust 1.4), should
+			// also remove need for `unsafe` block
+			let ok_t = thread_scoped::scoped(move|| -> Result<(), InternalError> {
+				let subscriber = subscriber.lock().unwrap();
+				for line_r in stdout.lines() {
+					let line = try!(line_r);
+					trace!("got journal line: {}", line);
+					let event = match Json::from_str(line.deref()) {
+						Ok(Json::Object(mut attrs)) => {
+							let mut source = None;
+							for key in source_keys.iter() {
+								match attrs.get(key) {
+									Some(&Json::String(ref s)) => {
+										source = Some(s.clone());
+										break;
+									},
+									_ => (),
+								}
 							}
-						}
 
-						let source = match source {
-							None => "UNKNOWN".to_string(),
-							Some(s) => {
-								attrs.insert("SOURCE".to_string(), Json::String(s.clone()));
-								s
-							}
-						};
-
-						filter(&source, &config.common.filters, attrs).map(|mut attrs| {
-							let message = match attrs.remove("MESSAGE") {
-								Some(Json::String(m)) => Some(m),
-								_ => None,
+							let source = match source {
+								None => "UNKNOWN".to_string(),
+								Some(s) => {
+									attrs.insert("SOURCE".to_string(), Json::String(s.clone()));
+									s
+								}
 							};
 
-							let severity = get_severity(&attrs);
-							
-							// JSON objects are BTreeMap, but we need a HashMap
-							let mut _attrs = HashMap::new();
-							_attrs.extend(attrs);
+							filter(&source, &config.common.filters, attrs).map(|mut attrs| {
+								let message = match attrs.remove("MESSAGE") {
+									Some(Json::String(m)) => Some(m),
+									_ => None,
+								};
 
-							Event {
-								id: None,
-								severity: severity,
-								message: message,
-								attrs: Arc::new(_attrs),
-							}
-						})
-					},
-					_ => {
-						Some(Event {
-							id: Some("internal".to_string()),
-							severity: Some(Severity::Info),
-							message: Some(format!("Unparseable journal line: {}", line)),
-							attrs: Arc::new(HashMap::new()),
-						})
-					},
-				};
-				match event {
-					Some(event) => {
-						let update = Arc::new(Update {
-							data: Data::Event(event),
-							source: id.clone(),
-							typ: "journal".to_string(),
-							time: Time::now(),
-						});
-						Self::send_update(&subscriber, update);
-					},
-					None => {
-						trace!("item filtered");
+								let severity = get_severity(&attrs);
+
+								// JSON objects are BTreeMap, but we need a HashMap
+								let mut _attrs = HashMap::new();
+								_attrs.extend(attrs);
+
+								Event {
+									id: None,
+									severity: severity,
+									message: message,
+									attrs: Arc::new(_attrs),
+								}
+							})
+						},
+						_ => {
+							Some(Event {
+								id: Some("internal".to_string()),
+								severity: Some(Severity::Info),
+								message: Some(format!("Unparseable journal line: {}", line)),
+								attrs: Arc::new(HashMap::new()),
+							})
+						},
+					};
+					match event {
+						Some(event) => {
+							let update = Arc::new(Update {
+								data: Data::Event(event),
+								source: id.clone(),
+								typ: "journal".to_string(),
+								time: Time::now(),
+							});
+							Self::send_update(&subscriber, update);
+						},
+						None => {
+							trace!("item filtered");
+						}
 					}
 				}
+				Err(InternalError::new("journalctl ended".to_string()))
+			});
+
+			let err_t = thread_scoped::scoped(move|| {
+				let msg = try!(read_all(&mut stderr));
+				Err(InternalError::new(format!("`systemctl show` failed: {}", msg)))
+			});
+
+			let status = try!(child.wait());
+			if !status.success() {
+				return err_t.join();
 			}
-			Err(InternalError::new("journalctl ended".to_string()))
-		}));
 
-		let err_t = try!(thread::Builder::new().scoped(move|| {
-			let msg = try!(read_all(&mut stderr));
-			Err(InternalError::new(format!("`systemctl show` failed: {}", msg)))
-		}));
-
-		let status = try!(child.wait());
-		if !status.success() {
-			return err_t.join();
+			try!(ok_t.join());
 		}
-
-		ok_t.join()
+		Ok(())
 	}
 }
 

@@ -5,6 +5,7 @@ use std::thread::{JoinHandle};
 use std::char;
 use std::io;
 use std::convert;
+use std::ops::Deref;
 use std::error::{Error};
 use std::sync::mpsc;
 use std::sync::{Arc};
@@ -86,13 +87,16 @@ impl SystemdPoller {
 						None => return Err(
 							InternalError::from(RuntimeError::MissingProperty("ActiveState"))
 						),
-						Some(state) => state_of_active_state(state.as_str()),
+						Some(state) => state_of_active_state(state.deref()),
 					};
 					let mut attrs = HashMap::with_capacity(props.len());
-					for (key, val) in props.drain() {
+					// TODO: use `drain` when possible, and remove `clone`
+					for (key, val) in props.iter() {
 						if val.len() == 0 {
 							continue;
 						}
+						let val = val.clone();
+						let key = key.clone();
 						let _ : Option<Json> /* ensure each branch inserts the key */ = if key.ends_with("Timestamp") {
 							// e.g. Sun 2015-05-24 13:59:07 AEST
 							// chrono doesn't support `%Z` timezone specifier, so we

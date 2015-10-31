@@ -1,13 +1,3 @@
-#![feature(scoped)]
-#![feature(convert)]
-#![feature(collections)]
-#![feature(collections_drain)]
-#![feature(std_misc)]
-#![feature(custom_derive, plugin)]
-#![feature(slice_patterns)]
-
-#![plugin(tojson_macros)]
-
 // XXX disable these when things get less prototypey
 #![allow(unused_imports)]
 #![allow(dead_code)]
@@ -20,6 +10,8 @@ extern crate rustc_serialize;
 extern crate glob;
 extern crate regex;
 extern crate dbus;
+extern crate worker;
+extern crate thread_scoped;
 
 #[macro_use]
 extern crate log;
@@ -35,7 +27,7 @@ mod system_monitor;
 mod systemd;
 mod systemd_common;
 mod systemd_dbus;
-mod systemd_subprocess;
+// mod systemd_subprocess;
 mod service;
 mod journal;
 mod config;

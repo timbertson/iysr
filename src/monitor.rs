@@ -9,8 +9,8 @@ use std::convert;
 use std::sync::mpsc;
 use std::sync::{Arc};
 use std::cmp::Ordering;
-use rustc_serialize::json::{Json,ToJson};
-use rustc_serialize::json;
+use rustc_serialize::json::{Json};
+use rustc_serialize::{Encodable,Encoder};
 use chrono::{DateTime,UTC};
 use chrono::Timelike;
 use super::errors::InternalError;
@@ -23,17 +23,7 @@ pub enum State {
 	Unknown,
 }
 
-macro_rules! enum_json {
-	($x:ty) => {
-		impl ToJson for $x {
-			fn to_json(&self) -> Json {
-				Json::String(format!("{:?}", self))
-			}
-		}
-	}
-}
-
-#[derive(Debug,Eq,PartialEq,Clone)]
+#[derive(Debug,Eq,PartialEq,Clone,RustcEncodable)]
 pub enum Severity {
 	Emergency,
 	Alert,
@@ -44,8 +34,6 @@ pub enum Severity {
 	Info,
 	Debug,
 }
-
-enum_json!(Severity);
 
 impl Severity {
 	pub fn to_int(&self) -> i64 {
@@ -110,24 +98,15 @@ impl Ord for Severity {
 	}
 }
 
-enum_json!(State);
-
 pub type Attributes = HashMap<String, Json>;
 
-#[derive(Debug, RustcEncodable,ToJson, Clone)]
+#[derive(Debug, RustcEncodable,Clone)]
 pub struct Status {
 	pub state: State,
 	pub attrs: Arc<Attributes>,
 }
 
-//impl ToJson for Status {
-//	fn to_json(&self) -> Json {
-//		// XXX this is suboptimal ;)
-//		json::decode(json::encode(self));
-//	}
-//}
-
-#[derive(Debug,ToJson)]
+#[derive(Debug,RustcEncodable)]
 pub struct Event {
 	pub id: Option<String>,
 	pub severity: Option<Severity>,
@@ -161,12 +140,12 @@ pub enum ComputedMetricValue {
 	Duration(Duration),
 }
 
-impl ToJson for ComputedMetricValue {
-	fn to_json(&self) -> Json {
+impl Encodable for ComputedMetricValue {
+	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
 		match *self {
-			ComputedMetricValue::Int(ref n) => n.to_json(),
-			ComputedMetricValue::Float(ref n) => n.to_json(),
-			ComputedMetricValue::Duration(ref n) => n.to_json(),
+			ComputedMetricValue::Int(ref n) => n.encode(s),
+			ComputedMetricValue::Float(ref n) => n.encode(s),
+			ComputedMetricValue::Duration(ref n) => n.encode(s),
 		}
 	}
 }
@@ -174,34 +153,28 @@ impl ToJson for ComputedMetricValue {
 #[derive(Debug)]
 pub struct Duration(chrono::Duration);
 
-impl ToJson for Duration {
-	fn to_json(&self) -> Json {
-		let mut attrs = BTreeMap::new();
-		match *self {
-			Duration(d) => {
-				attrs.insert("ms".to_string(), Json::I64(d.num_milliseconds()));
+impl Encodable for Duration {
+	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+		s.emit_struct("duration", 1, {|s|
+			match *self {
+				Duration(d) => {
+					s.emit_struct_field("ms", 0, {|s| d.num_milliseconds().encode(s) })
+				},
 			}
-		}
-		Json::Object(attrs)
+		})
 	}
 }
 
-#[derive(Debug,ToJson)]
+#[derive(Debug,RustcEncodable)]
 pub struct ComputedMetric {
 	pub id: String,
 	pub value: ComputedMetricValue,
 }
 
-#[derive(Debug,ToJson)]
+#[derive(Debug, RustcEncodable)]
 pub struct Metrics {
 	values: Vec<ComputedMetric>,
 	span: Duration,
-}
-
-impl ToJson for InternalError {
-	fn to_json(&self) -> Json {
-		self.reason.to_json()
-	}
 }
 
 pub trait PollMonitor {
@@ -223,7 +196,7 @@ pub enum Data {
 	Error(Failure),
 }
 
-#[derive(Debug,ToJson)]
+#[derive(Debug,RustcEncodable)]
 pub struct Failure {
 	// For ongoing / recurring errors, we use the same ID so that the UI can roll them up.
 	// Ephemeral errors don't need an ID.
@@ -231,18 +204,22 @@ pub struct Failure {
 	pub error: String,
 }
 
-impl ToJson for Data {
-	fn to_json(&self) -> Json {
-		let (key, val) = match *self {
-			Data::State(ref x) => ("State", x.to_json()),
-			Data::Event(ref x) => ("Event", x.to_json()),
-			Data::Metrics(ref x) => ("Metrics", x.to_json()),
-			Data::Error(ref x) => ("Error", x.to_json()),
-		};
-		let mut pair = Vec::new();
-		pair.push(key.to_json());
-		pair.push(val);
-		Json::Array(pair)
+impl Encodable for Data {
+	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+		s.emit_tuple(2, {|s| {
+			fn emit_pair<S:Encoder,V:Encodable>(s: &mut S, k: &'static str, v: &V) -> Result<(),S::Error> {
+				try!(s.emit_tuple_arg(0, encode_sub!(k)));
+				try!(s.emit_tuple_arg(1, encode_sub!(v)));
+				Ok(())
+			}
+
+			match *self {
+				Data::State(ref x) => emit_pair(s, "State", x),
+				Data::Event(ref x) => emit_pair(s, "Event", x),
+				Data::Metrics(ref x) => emit_pair(s, "Metrics", x),
+				Data::Error(ref x) => emit_pair(s, "Error", x),
+			}
+		}})
 	}
 }
 
@@ -268,22 +245,13 @@ impl fmt::Debug for Time {
 	}
 }
 
-//impl Encodable for Time {
-//	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
-//		encoder.emit_struct("Time", 2, |encoder| {
-//			try!(encoder.emit_struct_field("sec", 0usize, |e| self.timestamp().encode(e)));
-//			try!(encoder.emit_struct_field("ms", 1usize, |e| (self.time().nanosecond() / 1000000).encode(e)));
-//			Ok(())
-//		})
-//	}
-//}
-
-impl ToJson for Time {
-	fn to_json(&self) -> Json {
-		let mut attrs = BTreeMap::new();
-		attrs.insert(String::from_str("sec"), Json::I64(self.timestamp()));
-		attrs.insert(String::from_str("ms"), Json::U64((self.time().nanosecond() / 1000000) as u64));
-		Json::Object(attrs)
+impl Encodable for Time {
+	fn encode<S:Encoder>(&self, encoder: &mut S) -> Result<(), S::Error> {
+		encoder.emit_struct("Time", 2, |encoder| {
+			try!(encoder.emit_struct_field("sec", 0, |e| self.timestamp().encode(e)));
+			try!(encoder.emit_struct_field("ms", 1, |e| (self.time().nanosecond() / 1000000).encode(e)));
+			Ok(())
+		})
 	}
 }
 
@@ -295,14 +263,15 @@ pub struct Update {
 	pub data: Data,
 }
 
-impl ToJson for Update {
-	fn to_json(&self) -> Json {
-		let mut attrs = BTreeMap::new();
-		attrs.insert(String::from_str("source"), self.source.to_json());
-		attrs.insert(String::from_str("type"), self.typ.to_json());
-		attrs.insert(String::from_str("time"), self.time.to_json());
-		attrs.insert(String::from_str("data"), self.data.to_json());
-		Json::Object(attrs)
+impl Encodable for Update {
+	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+		s.emit_struct("update", 4, {|s| {
+			try!(s.emit_struct_field("source", 0, encode_sub!(self.source)));
+			try!(s.emit_struct_field("type", 1, encode_sub!(self.typ)));
+			try!(s.emit_struct_field("time", 2, encode_sub!(self.time)));
+			try!(s.emit_struct_field("data", 3, encode_sub!(self.data)));
+			Ok(())
+		}})
 	}
 }
 

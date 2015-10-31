@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc};
 use std::str::FromStr;
 use std::num::ParseIntError;
-use rustc_serialize::json::{Json,ToJson};
+use rustc_serialize::json::Json;
 use rustc_serialize::json;
 use chrono::{Duration};
 use monitor::Severity;
@@ -70,9 +70,9 @@ impl FilterCommon {
 					let attr = try!(attrs.descend_json("attr", as_string_opt));
 					let typ = try!(attrs.descend_json("type", |t| mandatory(t).and_then(as_string)));
 					let pat = try!(attrs.descend_json("pattern", |t| mandatory(t).and_then(as_string)));
-					let pat = match typ.as_str() {
-						"glob" => Pattern::Glob(try!(::glob::Pattern::new(pat.as_str()))),
-						"regex" => Pattern::Regex(try!(Regex::new(pat.as_str()))),
+					let pat = match typ.deref() {
+						"glob" => Pattern::Glob(try!(::glob::Pattern::new(pat.deref()))),
+						"regex" => Pattern::Regex(try!(Regex::new(pat.deref()))),
 						"literal" => Pattern::Literal(pat),
 						other => {
 							return Err(ConfigError::new(format!("Unsupported pattern type: {}", other)));
@@ -164,7 +164,7 @@ impl ModuleConfig for JournalConfig {
 }
 
 fn as_severity(s:String) -> Result<Severity, ConfigError> {
-	match s.as_str() {
+	match s.deref() {
 		"Emergency" => Ok(Severity::Emergency),
 		"Alert"     => Ok(Severity::Alert),
 		"Critical"  => Ok(Severity::Critical),
@@ -215,7 +215,7 @@ fn parse_source_config(id: &String, conf: Json) -> Result<SourceConfig, ConfigEr
 	};
 	ConfigCheck::consume_new_opt(conf, |conf| {
 		let id = id.clone();
-		Ok(match module.unwrap_or(id.clone()).as_str() {
+		Ok(match module.unwrap_or(id.clone()).deref() {
 			"systemd" => {
 				SourceConfig::Systemd(try!(parse_module(id, conf)))
 			},

@@ -1,9 +1,14 @@
 extern crate hyper;
+extern crate worker;
 
 use std::io;
+use std::fmt;
+use std::thread;
+use std::ops::Deref;
 use std::io::{Write};
 use std::collections::BTreeMap;
 use std::sync::{Arc,Mutex};
+use std::sync::mpsc::{sync_channel};
 
 use super::errors::InternalError;
 use super::monitor::{Update};
@@ -13,11 +18,17 @@ use hyper::net::{Fresh,Streaming};
 use hyper::header;
 use schedule_recv;
 use rustc_serialize::json;
-use rustc_serialize::json::{Json,ToJson};
-use rustc_serialize::{Encodable};
+use rustc_serialize::json::Json;
+use rustc_serialize::{Encodable, Encoder};
 
 struct Server {
 	monitor: Mutex<Box<SystemMonitor>>,
+}
+
+fn write_sse_end(dest: &mut io::Write) -> io::Result<()> {
+	try!(write!(dest, "\n"));
+	try!(dest.flush());
+	Ok(())
 }
 
 fn _write_sse(dest: &mut io::Write, prefix: &str, data: &str, end: bool) -> io::Result<()> {
@@ -26,71 +37,145 @@ fn _write_sse(dest: &mut io::Write, prefix: &str, data: &str, end: bool) -> io::
 		try!(write!(dest, "{}: {}\n", prefix, line));
 	}
 	if end {
-		try!(write!(dest, "\n"));
-		try!(dest.flush());
+		try!(write_sse_end(dest));
 	}
 	Ok(())
+}
+
+// Awkward wrapper around Response that is SSE-aware, mostly
+// so we can use `Encodable` rather than ToJson
+struct WriteSSE<'a, 'stream: 'a> {
+	response: &'a mut Response<'stream, Streaming>,
+	prefix: &'a str,
+	buffer: String,
+}
+
+impl<'a, 'stream> WriteSSE<'a, 'stream> {
+	fn end_msg(&mut self) -> io::Result<()> {
+		try!(self.flush());
+		write_sse_end(self.response)
+	}
+
+	fn keepalive(&mut self) -> io::Result<()> {
+		write_sse_keepalive(self.response)
+	}
+
+	fn emit_json<F>(&mut self, f: F) -> Result<(), json::EncoderError>
+		where F: FnOnce(&mut json::Encoder) -> Result<(), json::EncoderError>
+	{
+		let mut encoder = json::Encoder::new(self);
+		f(&mut encoder)
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		if self.buffer.len() > 0 {
+			try!(_write_sse(self.response, self.prefix, self.buffer.deref(), false));
+			self.buffer.truncate(0);
+		}
+		Ok(())
+	}
+}
+
+impl<'a, 'stream> fmt::Write for WriteSSE<'a, 'stream> {
+	// XXX pretty lame buffer impl
+	fn write_str(&mut self, s: &str) -> fmt::Result {
+		let new_len = self.buffer.len() + s.len();
+		if new_len > 100 {
+			try!(match self.flush() {
+				Ok(()) => Ok(()),
+				Err(_) => Err(fmt::Error),
+			})
+		}
+		self.buffer.push_str(s);
+		Ok(())
+	}
 }
 
 fn write_sse(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<()> {
 	_write_sse(dest, prefix, data, true)
 }
-//fn write_sse_part(dest: &mut io::Write, prefix: &str, data: &str) -> io::Result<()> {
-//	_write_sse(dest, prefix, data, false)
-//}
+
 fn write_sse_keepalive(dest: &mut io::Write) -> io::Result<()> {
 	try!(write!(dest, ":\n"));
 	dest.flush()
 }
 
 impl Server {
-	fn try_handle(&self, response: &mut Response<Streaming>) -> Result<(), InternalError> {
+	// 'a: 'stream means "'a outlives 'stream" - i.e. the reference
+	// lives less long than the data it references
+	fn try_handle<'a, 'stream: 'a>(&self, response: &'a mut Response<'stream, Streaming>) -> Result<(), InternalError> {
 		let receiver = {
 			try!(self.monitor.lock().unwrap().subscribe())
 		};
 
+		let mut writer = WriteSSE {
+			response: response,
+			prefix: "data",
+			buffer: String::with_capacity(100),
+		};
+		// let mut encoder = json::Encoder::new(&mut writer);
+
+		// XXX it'd be convenient to use select! here, but that's unavailable in stable
+
+		let (emit, combined_data) = sync_channel(0);
+
+		let timeout_emit = emit.clone();
+		let _t = try!(worker::spawn_anon(move |t| -> Result<(),InternalError> {
+			// let keepalive_writer = writer.clone();
+			let _keepalive_thread = try!(t.spawn_anon(move |t| -> Result<(),InternalError> {
+				loop {
+					thread::sleep_ms(10000);
+					try!(t.tick());
+					try!(timeout_emit.send(None));
+				}
+			}));
+
+			loop {
+				let data = try!(receiver.recv());
+				try!(t.tick());
+				try!(emit.send(Some(data)));
+			}
+		}));
+
+
 		let mut last_state = None;
 		loop {
-			let timer = schedule_recv::oneshot_ms(10000);
-			select!(
-				data = receiver.recv() => {
-					let data = try!(data);
-					let json = data.to_json();
-					let mut attrs = BTreeMap::new();
-					attrs.insert(String::from_str("key"), "TODO_UNIQUE_KEY".to_json());
-					let overlay = String::from_str("overlay");
-					//let next_state = Some(json.clone());
-					let (next_state, update) = match last_state {
-						None => {
-							attrs.insert(overlay, "replace".to_json());
-							(json.clone(), json)
-						},
-						Some(_old_data) => {
-							/* TODO: diffing! */
-							attrs.insert(overlay, "diff".to_json());
-							(json.clone(), json)
-						}
-					};
-					last_state = Some(next_state);
-					attrs.insert(String::from_str("data"), update);
+			match try!(combined_data.recv()) {
+				None => try!(writer.keepalive()),
+				Some(data) => {
+					let old_state = last_state;
+					last_state = Some(data.clone());
+					try!(writer.emit_json(|s| {
+						s.emit_struct("data", 3, {|s| {
+							fn emit_pair<S:Encoder,V:Encodable>(s: &mut S, k: &'static str, v: &V) -> Result<(),S::Error> {
+								try!(s.emit_struct_field("key", 0, encode_sub!("TODO_UNIQUE_KEY")));
+								try!(s.emit_struct_field("overlay", 1, encode_sub!(k)));
+								try!(s.emit_struct_field("data", 2, encode_sub!(v)));
+								Ok(())
+							}
 
-					let data = Json::Object(attrs);
-					// TODO: lazy (asJson) encoding?
-					let data = try!(json::encode(&data));
-					//try!(write_sse_part(response, "event", &"state"));
-					try!(write_sse(response, "data", &data));
-				},
-
-				_ = timer.recv() => {
-					try!(write_sse_keepalive(response));
+							//let next_state = Some(json.clone());
+							match old_state {
+								None => {
+									try!(emit_pair(s, "replace", &*data));
+								},
+								Some(ref _old_data) => {
+									/* TODO: diffing! */
+									try!(emit_pair(s, "diff", &*data));
+								}
+							};
+							Ok(())
+						}})
+					}));
+					try!(writer.end_msg());
 				}
-			);
+			}
 		}
 	}
 
 	fn try_report_exception(&self, e: &InternalError, response: &mut Response<Streaming>) -> Result<(), io::Error> {
 		let desc = format!("{}", e);
-		try!(write_sse(response, "error", &desc.as_str()));
+		try!(write_sse(response, "error", &desc));
 		Ok(())
 	}
 }
@@ -105,7 +190,7 @@ impl Handler for Server {
 			headers.set(ContentType(
 				Mime(
 					TopLevel::Text,
-					SubLevel::Ext(String::from_str("event-stream")),
+					SubLevel::Ext(String::from("event-stream")),
 					Vec::new()
 				)
 			));
@@ -135,7 +220,7 @@ impl Handler for Server {
 
 pub fn main(monitor: SystemMonitor) -> Result<(),InternalError> {
 	let server = Server { monitor: Mutex::new(Box::new(monitor)), };
-	match hyper::Server::http(server).listen("127.0.0.1:3000") {
+	match hyper::Server::http("127.0.0.1:3000").and_then(|s| s.handle(server)) {
 		Ok(_) => {
 			errln!("Server listening on port 3000");
 			Ok(())

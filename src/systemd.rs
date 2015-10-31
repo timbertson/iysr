@@ -19,7 +19,7 @@ use dbus::{Connection,BusType,Message,MessageItem,Props};
 use super::errors::*;
 use super::systemd_dbus::*;
 use super::systemd_common::*;
-use super::systemd_subprocess::*;
+// use super::systemd_subprocess::*;
 extern crate dbus;
 
 pub struct SystemdMonitor {
@@ -42,11 +42,11 @@ impl SystemdMonitor {
 
 		// TODO: use includes instead of hard-coded stufff
 		let mut ignored = HashSet::new();
-		ignored.insert(String::from_str("device"));
-		ignored.insert(String::from_str("target"));
-		ignored.insert(String::from_str("slice"));
-		ignored.insert(String::from_str("machine"));
-		ignored.insert(String::from_str("mount"));
+		ignored.insert(String::from("device"));
+		ignored.insert(String::from("target"));
+		ignored.insert(String::from("slice"));
+		ignored.insert(String::from("machine"));
+		ignored.insert(String::from("mount"));
 
 		SystemdMonitor {
 			id: common.id,
@@ -55,13 +55,13 @@ impl SystemdMonitor {
 		}
 	}
 
-	pub fn poller(&self) -> Box<SystemdPoller> {
-		Box::new(SystemdPoller {
-			ignored_types: self.ignored_types.clone(),
-			user: self.user,
-			id: self.id.clone(),
-		})
-	}
+	// pub fn poller(&self) -> Box<SystemdPoller> {
+	// 	Box::new(SystemdPoller {
+	// 		ignored_types: self.ignored_types.clone(),
+	// 		user: self.user,
+	// 		id: self.id.clone(),
+	// 	})
+	// }
 
 	pub fn pusher(&self) -> Box<SystemdPusher> {
 		Box::new(SystemdPusher {

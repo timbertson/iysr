@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Arc};
 use std::str::FromStr;
 use std::num::ParseIntError;
-use rustc_serialize::json::{Json,ToJson};
+use rustc_serialize::json::Json;
 use rustc_serialize::json;
 use chrono::{Duration};
 use monitor::Severity;
@@ -79,7 +79,7 @@ impl fmt::Display for ConfigError {
 			try!(" in config: `".fmt(formatter));
 			let mut path = self.context.clone();
 			path.reverse();
-			try!(path.as_slice().connect(".").fmt(formatter));
+			try!(path.join(".").fmt(formatter));
 			try!("`".fmt(formatter));
 		}
 		Ok(())
@@ -89,7 +89,7 @@ impl fmt::Display for ConfigError {
 impl Error for ConfigError {
 	fn description(&self) -> &str {
 		match self.reason {
-			ConfigErrorReason::Generic(ref msg) => msg.as_str(),
+			ConfigErrorReason::Generic(ref msg) => msg.deref(),
 			ConfigErrorReason::MissingKey(_) => "MissingKey",
 			ConfigErrorReason::Missing => "Missing",
 		}

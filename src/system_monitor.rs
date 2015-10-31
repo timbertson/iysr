@@ -1,5 +1,3 @@
-extern crate chrono;
-
 use chrono::{DateTime,UTC};
 use std::collections::{HashMap,BTreeMap};
 use std::collections::hash_map::{Entry};
@@ -13,29 +11,24 @@ use std::ops::Deref;
 use monitor::*;
 use errors::*;
 use rustc_serialize::{Encoder,Encodable};
-use rustc_serialize::json;
-use rustc_serialize::json::{Json,ToJson};
-
-impl ToJson for SourceStatus {
-	fn to_json(&self) -> Json {
-		let mut attrs = BTreeMap::new();
-		attrs.insert(String::from_str("type"), self.typ.to_json());
-		match self.status {
-			Ok(ref v) => {
-				attrs.insert(String::from_str("ok"), v.to_json());
-			},
-			Err(ref v) => {
-				attrs.insert(String::from_str("err"), v.to_json());
-			},
-		}
-		Json::Object(attrs)
-	}
-}
 
 #[derive(Debug)]
 pub struct SourceStatus {
 	typ: String,
 	status: Result<HashMap<String, Status>, InternalError>,
+}
+
+impl Encodable for SourceStatus {
+	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+		s.emit_struct("status", 2, {|s| {
+			try!(s.emit_struct_field("type", 0, encode_sub!(self.typ)));
+			try!(match self.status {
+				Ok(ref v) => s.emit_struct_field("ok", 1, encode_sub!(v)),
+				Err(ref v) => s.emit_struct_field("err", 1, encode_sub!(v)),
+			});
+			Ok(())
+		}})
+	}
 }
 
 type Listeners = HashMap<u32, mpsc::SyncSender<Arc<Update>>>;
@@ -236,7 +229,7 @@ impl SystemMonitor {
 				self.subscriber_id += 1;
 				let num_listeners = listeners.len() as u32;
 				if num_listeners > ::std::u32::MAX / 2 {
-					return Err(InternalError::new(String::from_str("Too many listeners")))
+					return Err(InternalError::new(String::from("Too many listeners")))
 				}
 				match listeners.entry(id) {
 					Entry::Vacant(entry) => {

@@ -10,8 +10,12 @@ rustc-serialize = "*"
 log = "*"
 env_logger = "*"
 schedule_recv = "*"
-tojson_macros = "*"
+# tojson_macros = "*"
 dbus = "*"
+thread-scoped = "*"
 
 # server
 hyper = "*"
+
+[dependencies.worker]
+path = "./worker"

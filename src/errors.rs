@@ -6,17 +6,24 @@ use std::fmt;
 use std::string;
 use std::io;
 use std::convert;
+use std::ops::Deref;
 use std::sync::mpsc;
 use std::sync::{Arc};
 use std::cmp::Ordering;
-use rustc_serialize::json::{Json,ToJson};
-use rustc_serialize::json;
+use rustc_serialize::{json,Encodable,Encoder};
 use chrono::{DateTime,UTC};
 use chrono::Timelike;
+use worker::{WorkerError,TickError};
 
-#[derive(Debug, RustcEncodable)]
+#[derive(Debug)]
 pub struct InternalError {
 	pub reason: String,
+}
+
+impl Encodable for InternalError {
+	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+		self.reason.encode(s)
+	}
 }
 
 impl InternalError {
@@ -73,7 +80,24 @@ coerce_to_internal_error!(
 
 impl Error for InternalError {
 	fn description(&self) -> &str {
-		self.reason.as_str()
+		self.reason.deref()
 	}
 }
 
+impl convert::From<WorkerError<InternalError>> for InternalError {
+	fn from(err: WorkerError<InternalError>) -> InternalError {
+		match err {
+			WorkerError::Cancelled => InternalError::new(String::from("worker cancelled")),
+			WorkerError::Failed(e) => e,
+			WorkerError::Aborted(reason) => InternalError::new(reason),
+		}
+	}
+}
+
+impl convert::From<TickError> for InternalError {
+	fn from(err: TickError) -> InternalError {
+		match err {
+			TickError::Cancelled => InternalError::new(String::from("worker cancelled")),
+		}
+	}
+}
