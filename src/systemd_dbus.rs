@@ -34,6 +34,7 @@ const SYSTEMD_UNIT_IFACE: &'static str = "org.freedesktop.systemd1.Unit";
 const DBUS_CALL_TIMEOUT: i32 = 1000 * 60;
 const UNIT_ADDED: &'static str = "UnitNew";
 const UNIT_REMOVED: &'static str = "UnitRemoved";
+const RELOADING: &'static str = "Reloading";
 const PROPERTIES_CHANGED: &'static str = "PropertiesChanged";
 
 
@@ -90,9 +91,9 @@ pub fn watch_units(
 
 	// let _msgid_list_units = conn.send(try!(method_call("ListUnits")));
 	// TODO: use these
-	try!(conn.add_match(match_rule("UnitNew", None).deref()));
-	try!(conn.add_match(match_rule("UnitRemoved", None).deref()));
-	try!(conn.add_match(match_rule("Reloading", None).deref()));
+	try!(conn.add_match(match_rule(UNIT_ADDED, None).deref()));
+	try!(conn.add_match(match_rule(UNIT_REMOVED, None).deref()));
+	// try!(conn.add_match(match_rule(RELOADING, None).deref()));
 
 	let unit_listing = try!(conn.send_with_reply_and_block(try!(method_call("ListUnits")), DBUS_CALL_TIMEOUT));
 
@@ -349,13 +350,14 @@ impl<'a> DBusState<'a> {
 
 	fn _process_message(&mut self, message: ConnectionItem) -> Result<(), InternalError> {
 		use dbus::MessageItem::*;
-		// debug!("MSG: {:?}", message);
+		debug!("MSG: {:?}", message);
 		fn unexpected_message<T>(m: &fmt::Debug) -> Result<T,InternalError> {
 			Err(InternalError::new(format!("Unknown DBus message: {:?}", m)))
 		}
 
 		match message {
 			ConnectionItem::Nothing => Ok(()),
+			ConnectionItem::WatchFd(_) => Ok(()),
 			ConnectionItem::Signal(msg) => {
 				// debug!("MSG HEADERS: {:?}", msg.headers());
 				let headers = msg.headers();
@@ -371,6 +373,7 @@ impl<'a> DBusState<'a> {
 						match (signal_name, unit_id) {
 							(Some(UNIT_ADDED), Some((name, path))) => (self.add_unit(&name, &path)),
 							(Some(UNIT_REMOVED), Some((_name, path))) => (self.remove_unit(&path)),
+							// (Some(RELOADING), None) => /* ... */,
 							other => unexpected_message(&other),
 						}
 					},

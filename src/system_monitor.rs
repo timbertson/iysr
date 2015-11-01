@@ -180,6 +180,7 @@ impl SystemMonitor {
 				state.push(data);
 			}
 			{
+				// XXX update last_state from run_loop too
 				let mut last_state = last_state.lock().unwrap();
 				*last_state = Some(state);
 			};
@@ -216,6 +217,7 @@ impl SystemMonitor {
 			None => (),
 			Some(state) => {
 				debug!("sending {} initial updates from last_state", state.len());
+				debug!("last_state: {:?}", state);
 				for update in state.iter() {
 					ignore_error!(sender.try_send(update.clone()), "sending initial state");
 				}
