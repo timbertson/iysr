@@ -25,13 +25,13 @@ extern crate dbus;
 pub struct SystemdMonitor {
 	ignored_types: HashSet<String>,
 	user: bool,
-	id: String,
+	source: Arc<Source>,
 }
 
 pub struct SystemdPusher {
 	ignored_types: HashSet<String>,
 	user: bool,
-	id: String,
+	source: Arc<Source>,
 }
 
 impl SystemdMonitor {
@@ -48,7 +48,7 @@ impl SystemdMonitor {
 		ignored.insert(String::from("mount"));
 
 		SystemdMonitor {
-			id: common.id,
+			source: Arc::new(Source::new(common.id, SYSTEMD_TYPE)),
 			user: user,
 			ignored_types: ignored,
 		}
@@ -66,14 +66,13 @@ impl SystemdMonitor {
 		Box::new(SystemdPusher {
 			ignored_types: self.ignored_types.clone(),
 			user: self.user,
-			id: self.id.clone(),
+			source: self.source.clone(),
 		})
 	}
 }
 
 impl DataSource for SystemdPusher {
-	fn id(&self) -> String { self.id.clone() }
-	fn typ(&self) -> String { "systemd".to_string() }
+	fn source(&self) -> Arc<Source> { self.source.clone() }
 }
 
 impl PushDataSource for SystemdPusher {
@@ -82,9 +81,9 @@ impl PushDataSource for SystemdPusher {
 		let ignored_types = self.ignored_types.clone();
 
 		let error_reporter = ErrorReporter::new(self);
-		let source = MonitorDataSource::extract(self);
+		let source = self.source();
 		let thread = try!(thread::Builder::new().spawn(move|| -> Result<(), InternalError> {
-			let rv = watch_units(&sender, &source, which, ignored_types, error_reporter);
+			let rv = watch_units(&sender, source.clone(), which, ignored_types, error_reporter);
 			match rv {
 				Ok(()) => Ok(()),
 				Err(e) => {
@@ -94,8 +93,7 @@ impl PushDataSource for SystemdPusher {
 							error: format!("failed to monitor systemd units: {}", e),
 						}),
 						scope: UpdateScope::Partial,
-						source: source.id(),
-						typ: source.typ(),
+						source: source,
 						time: Time::now(),
 					})), "Sending error event");
 					Err(e)

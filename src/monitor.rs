@@ -183,11 +183,6 @@ pub trait PollMonitor {
 	fn poll(&self, &Self::T) -> Status;
 }
 
-pub trait Monitor: Send + Sync {
-	fn typ(&self) -> String;
-	fn scan(&self) -> Result<HashMap<String, Status>, InternalError>;
-}
-
 #[derive(Debug)]
 pub enum Data {
 	State(HashMap<String, Status>),
@@ -263,10 +258,24 @@ pub enum UpdateScope {
 }
 
 #[derive(Debug)]
+pub struct Source {
+	pub id: String,
+	pub typ: &'static str,
+}
+
+impl Source {
+	pub fn new(id: String, typ: &'static str) -> Source {
+		Source {
+			id: id,
+			typ: typ,
+		}
+	}
+}
+
+#[derive(Debug)]
 pub struct Update {
-	pub source: String,
+	pub source: Arc<Source>,
 	pub scope: UpdateScope,
-	pub typ: String,
 	pub time: Time,
 	pub data: Data,
 }
@@ -274,8 +283,8 @@ pub struct Update {
 impl Encodable for Update {
 	fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
 		s.emit_struct("update", 4, {|s| {
-			try!(s.emit_struct_field("source", 0, encode_sub!(self.source)));
-			try!(s.emit_struct_field("type", 1, encode_sub!(self.typ)));
+			try!(s.emit_struct_field("source", 0, encode_sub!(self.source.id)));
+			try!(s.emit_struct_field("type", 1, encode_sub!(self.source.typ)));
 			try!(s.emit_struct_field("time", 2, encode_sub!(self.time)));
 			try!(s.emit_struct_field("data", 3, encode_sub!(self.data)));
 			Ok(())
@@ -284,30 +293,11 @@ impl Encodable for Update {
 }
 
 pub trait DataSource: Send + Sync {
-	fn id(&self) -> String;
-	fn typ(&self) -> String;
+	fn source(&self) -> Arc<Source>;
 }
 
-impl DataSource for MonitorDataSource {
-	fn id(&self) -> String { self.id.clone() }
-	fn typ(&self) -> String { self.typ.clone() }
-}
-
-pub struct MonitorDataSource {
-	id: String,
-	typ: String,
-}
-
-impl MonitorDataSource {
-	pub fn extract(src: &DataSource) -> MonitorDataSource {
-		MonitorDataSource {
-			id: src.id(),
-			typ: src.typ(),
-		}
-	}
-}
-
-pub trait PullDataSource: Send + Sync + DataSource {
+pub trait PullDataSource: Send + Sync {
+	fn source(&self) -> Arc<Source>;
 	fn poll(&self) -> Result<Data, InternalError>;
 }
 
@@ -319,15 +309,13 @@ pub trait PushDataSource: Send + Sync {
 }
 
 pub struct ErrorReporter {
-	id: String,
-	typ: String,
+	source: Arc<Source>,
 }
 
 impl ErrorReporter {
 	pub fn new(src: &DataSource) -> ErrorReporter {
 		ErrorReporter {
-			id: src.id(),
-			typ: src.typ(),
+			source: src.source(),
 		}
 	}
 
@@ -340,8 +328,7 @@ impl ErrorReporter {
 						id: None,
 						error: format!("Error {}: {}", error_msg, e),
 					}),
-					source: self.id.clone(),
-					typ: self.typ.clone(),
+					source: self.source.clone(),
 					scope: UpdateScope::Partial,
 					time: Time::now(),
 				})));

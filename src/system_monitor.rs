@@ -112,7 +112,7 @@ impl StateSnapshot {
 
 	fn update(&self, update: &Arc<Update>) {
 		let mut state = self.state.lock().unwrap();
-		state.insert(update.source.clone(), update.clone());
+		state.insert(update.source.id.clone(), update.clone());
 	}
 
 	fn values(&self) -> Vec<Arc<Update>> {
@@ -187,8 +187,6 @@ impl SystemMonitor {
 			for source in pull_sources.iter() {
 				// XXX can we not clone this?
 				let time = Time::now();
-				let typ = source.typ();
-				let id = source.id();
 				let data = match source.poll() {
 					Ok(data) => data,
 					Err(e) => Data::Error(Failure {
@@ -198,8 +196,7 @@ impl SystemMonitor {
 				};
 				let data = Arc::new(Update {
 					time: time,
-					source: id,
-					typ: typ,
+					source: source.source(),
 					data: data,
 					scope: UpdateScope::Snapshot,
 				});
@@ -294,7 +291,6 @@ impl SystemMonitor {
 				let listeners = listeners.clone();
 				let poll_last_state = last_state.clone();
 				let push_last_state = last_state.clone();
-				//let pull_sources : Vec<Box<PullDataSource>> = pull_sources.clone();
 				let poll_thread = try!(thread::Builder::new().spawn(move ||
 					Self::poll_loop(sleep_ms, pull_sources, poll_last_state, event_writable)
 				));

@@ -21,6 +21,8 @@ use config::{JournalConfig};
 use filter::{filter,get_severity};
 extern crate thread_scoped;
 
+const JOURNAL_TYPE: &'static str = "journal";
+
 type SharedRef<T> = Arc<Mutex<T>>;
 
 pub struct Journal {
@@ -73,13 +75,13 @@ impl Journal {
 
 	fn run_thread(
 		config: JournalConfig,
+		source: Arc<Source>,
 		subscriber: SyncSender<Arc<Update>>
 	) -> Result<(), InternalError>
 	{
-		let ref id = config.common.id;
 		let subscriber = Arc::new(Mutex::new(subscriber));
 		loop {
-			match Self::follow_journal(&config, &subscriber) {
+			match Self::follow_journal(&config, &source, &subscriber) {
 				Ok(()) => (),
 				Err(e) => {
 					let subscriber = subscriber.lock().unwrap();
@@ -89,8 +91,7 @@ impl Journal {
 							error: format!("failed to follow journal logs: {}", e),
 						}),
 						scope: UpdateScope::Partial,
-						source: id.clone(),
-						typ: "journal".to_string(),
+						source: source.clone(),
 						time: Time::now(),
 					}));
 					// XXX make this configurable
@@ -102,10 +103,10 @@ impl Journal {
 
 	fn follow_journal(
 		config: &JournalConfig,
+		data_source: &Arc<Source>,
 		subscriber: &Arc<Mutex<SyncSender<Arc<Update>>>>
 	) -> Result<(), InternalError>
 	{
-		let id = config.common.id.clone();
 		let mut child = try!(Self::spawn());
 		let stdout = BufReader::new(try!(child.stdout.take().ok_or(RuntimeError::ChildOutputStreamMissing)));
 		let mut stderr = try!(child.stderr.take().ok_or(RuntimeError::ChildOutputStreamMissing));
@@ -174,8 +175,7 @@ impl Journal {
 							let update = Arc::new(Update {
 								scope: UpdateScope::Partial,
 								data: Data::Event(event),
-								source: id.clone(),
-								typ: "journal".to_string(),
+								source: data_source.clone(),
 								time: Time::now(),
 							});
 							Self::send_update(&subscriber, update);
@@ -230,8 +230,9 @@ impl PushSubscription for JournalSubscription {
 impl PushDataSource for Journal {
 	fn subscribe(&self, subscriber: SyncSender<Arc<Update>>) -> Result<Box<PushSubscription>, InternalError> {
 		let config = self.config.clone();
+		let source = Arc::new(Source::new(config.common.id.clone(), JOURNAL_TYPE));
 		let thread = try!(thread::Builder::new().spawn(move ||
-			Self::run_thread(config, subscriber)
+			Self::run_thread(config, source, subscriber)
 		));
 		Ok(Box::new(JournalSubscription { thread: Some(thread) }))
 	}

@@ -76,7 +76,7 @@ fn matchable_headers<'a>(
 
 pub fn watch_units(
 	sender: &mpsc::SyncSender<Arc<Update>>,
-	source: &MonitorDataSource,
+	source: Arc<Source>,
 	bus: BusType,
 	ignored_types: HashSet<String>,
 	error_reporter: ErrorReporter
@@ -190,7 +190,7 @@ struct DBusState<'a> {
 	conn: &'a Connection,
 	sender: &'a mpsc::SyncSender<Arc<Update>>,
 	ignored_types: &'a HashSet<String>,
-	source: &'a MonitorDataSource,
+	source: Arc<Source>,
 	error_reporter: ErrorReporter,
 	// XXX these should be keyed as `Path`, but that's not hashable
 	units: HashMap<String,DBusUnit>,
@@ -205,7 +205,7 @@ impl<'a> DBusState<'a> {
 	fn new(
 		conn: &'a Connection,
 		sender: &'a mpsc::SyncSender<Arc<Update>>,
-		source: &'a MonitorDataSource,
+		source: Arc<Source>,
 		ignored_types: &'a HashSet<String>,
 		error_reporter: ErrorReporter
 	) -> DBusState<'a>
@@ -299,8 +299,7 @@ impl<'a> DBusState<'a> {
 	fn emit(&self) -> Result<(), InternalError> {
 		try!(self.sender.send(Arc::new(Update {
 			scope: UpdateScope::Snapshot,
-			source: self.source.id(),
-			typ: self.source.typ(),
+			source: self.source.clone(),
 			time: Time::now(),
 			data: Data::State(self.state.clone()),
 		})));
