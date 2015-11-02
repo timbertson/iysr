@@ -18,13 +18,13 @@ use util::read_all;
 use dbus::{Connection,BusType,Message,MessageItem,Props};
 use super::errors::*;
 
-pub const SYSTEMD_ID : &'static str = "systemd";
+pub const SYSTEMD_TYPE : &'static str = "systemd";
 
 #[derive(Debug)]
 pub enum RuntimeError {
 	UnexpectedBlankLine,
 	ChildOutputStreamMissing,
-	BadServiceName,
+	BadServiceName(String),
 	MissingProperty(&'static str),
 }
 
@@ -33,7 +33,7 @@ impl fmt::Display for RuntimeError {
 		match *self {
 			RuntimeError::UnexpectedBlankLine => "Unexpected blank line".fmt(formatter),
 			RuntimeError::ChildOutputStreamMissing => "Child output stream missing".fmt(formatter),
-			RuntimeError::BadServiceName => "Bad service name (TODO: which?)".fmt(formatter),
+			RuntimeError::BadServiceName(ref name) => format!("Bad service name: {}", name).fmt(formatter),
 			RuntimeError::MissingProperty(p) => format!("Missing service property: {}", p).fmt(formatter),
 		}
 	}
@@ -48,7 +48,7 @@ impl Error for RuntimeError {
 coerce_to_internal_error!(RuntimeError);
 
 pub fn should_ignore_unit(ignored_types: &HashSet<String>, unit: &str) -> Result<bool, InternalError> {
-	let unit_type = try!(unit.rsplit('.').next().ok_or(RuntimeError::BadServiceName));
+	let unit_type = try!(unit.rsplit('.').next().ok_or(RuntimeError::BadServiceName(unit.to_string())));
 	//debug!("unit type: {}, ignored_types = {:?}", unit_type, self.ignored_types);
 	Ok(if ignored_types.contains(unit_type) {
 		debug!("ignoring unit: {}", unit);

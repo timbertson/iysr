@@ -76,6 +76,7 @@ fn matchable_headers<'a>(
 
 pub fn watch_units(
 	sender: &mpsc::SyncSender<Arc<Update>>,
+	source: &MonitorDataSource,
 	bus: BusType,
 	ignored_types: HashSet<String>,
 	error_reporter: ErrorReporter
@@ -84,17 +85,18 @@ pub fn watch_units(
 	use dbus::MessageItem::*;
 	debug!("Connecting to {:?} bus", bus);
 	let conn = try!(Connection::get_private(bus));
-	let mut dbus_state = DBusState::new(&conn, sender, &ignored_types, error_reporter);
+	let mut dbus_state = DBusState::new(&conn, sender, source, &ignored_types, error_reporter);
 
 	debug!("Subscribing to {}", SYSTEMD_DBUS_DEST);
 	let _:Message = try!(call_method(&conn, try!(method_call("Subscribe"))));
 
-	// let _msgid_list_units = conn.send(try!(method_call("ListUnits")));
 	// TODO: use these
 	try!(conn.add_match(match_rule(UNIT_ADDED, None).deref()));
 	try!(conn.add_match(match_rule(UNIT_REMOVED, None).deref()));
 	// try!(conn.add_match(match_rule(RELOADING, None).deref()));
 
+	// XXX can't we do this async? Something like:
+	// let _msgid_list_units = conn.send(try!(method_call("ListUnits")));
 	let unit_listing = try!(conn.send_with_reply_and_block(try!(method_call("ListUnits")), DBUS_CALL_TIMEOUT));
 
 	for item in unit_listing.get_items() {
@@ -110,8 +112,6 @@ pub fn watch_units(
 	}
 	// initial state computed - send it
 	try!(dbus_state.emit());
-	// TODO: subscribe to all...
-
 
 	loop {
 		let messages = conn.iter(1000 * 60); // 1min timeout
@@ -190,6 +190,7 @@ struct DBusState<'a> {
 	conn: &'a Connection,
 	sender: &'a mpsc::SyncSender<Arc<Update>>,
 	ignored_types: &'a HashSet<String>,
+	source: &'a MonitorDataSource,
 	error_reporter: ErrorReporter,
 	// XXX these should be keyed as `Path`, but that's not hashable
 	units: HashMap<String,DBusUnit>,
@@ -204,6 +205,7 @@ impl<'a> DBusState<'a> {
 	fn new(
 		conn: &'a Connection,
 		sender: &'a mpsc::SyncSender<Arc<Update>>,
+		source: &'a MonitorDataSource,
 		ignored_types: &'a HashSet<String>,
 		error_reporter: ErrorReporter
 	) -> DBusState<'a>
@@ -212,6 +214,7 @@ impl<'a> DBusState<'a> {
 			conn: conn,
 			sender: sender,
 			ignored_types: ignored_types,
+			source: source,
 			error_reporter: error_reporter,
 			units: HashMap::new(),
 			state: HashMap::new(),
@@ -295,9 +298,9 @@ impl<'a> DBusState<'a> {
 
 	fn emit(&self) -> Result<(), InternalError> {
 		try!(self.sender.send(Arc::new(Update {
-			source: format!("TODO"),
 			scope: UpdateScope::Snapshot,
-			typ: format!("TODO"),
+			source: self.source.id(),
+			typ: self.source.typ(),
 			time: Time::now(),
 			data: Data::State(self.state.clone()),
 		})));
@@ -336,6 +339,7 @@ impl<'a> DBusState<'a> {
 			},
 			Some(unit) => {
 				debug!("Removing unit {}", unit.name);
+				ignore_error!(self.conn.remove_match(property_match_rule(path).deref()), "removing property match");
 				let _:Option<Status> = self.state.remove(unit.name.deref());
 				self.emit()
 			},
@@ -379,7 +383,6 @@ impl<'a> DBusState<'a> {
 						}
 					},
 					(MessageType::Signal,unit_path,Some(DBUS_PROPERTIES_IFACE),Some(PROPERTIES_CHANGED)) => {
-						// warn!("TODO: process changed properties for unit {:?}, {:?}", unit_path, msg.get_items());
 						// items is an array of [iface_name, changed, invalidated]. We could potentially
 						// use these to update state, but let's just do a fresh poll for simplicity...
 						match unit_path {

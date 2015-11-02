@@ -288,6 +288,25 @@ pub trait DataSource: Send + Sync {
 	fn typ(&self) -> String;
 }
 
+impl DataSource for MonitorDataSource {
+	fn id(&self) -> String { self.id.clone() }
+	fn typ(&self) -> String { self.typ.clone() }
+}
+
+pub struct MonitorDataSource {
+	id: String,
+	typ: String,
+}
+
+impl MonitorDataSource {
+	pub fn extract(src: &DataSource) -> MonitorDataSource {
+		MonitorDataSource {
+			id: src.id(),
+			typ: src.typ(),
+		}
+	}
+}
+
 pub trait PullDataSource: Send + Sync + DataSource {
 	fn poll(&self) -> Result<Data, InternalError>;
 }

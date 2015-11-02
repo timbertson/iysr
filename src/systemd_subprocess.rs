@@ -252,7 +252,7 @@ impl SystemdPoller {
 
 impl DataSource for SystemdPoller {
 	fn typ(&self) -> String {
-		return String::from_str(SYSTEMD_ID);
+		return String::from_str(SYSTEMD_TYPE);
 	}
 	fn id(&self) -> String {
 		self.id.clone()

@@ -34,7 +34,6 @@ pub struct SystemdPusher {
 	id: String,
 }
 
-
 impl SystemdMonitor {
 	pub fn new(conf: SystemdConfig) -> SystemdMonitor {
 		let common = conf.common;
@@ -83,8 +82,9 @@ impl PushDataSource for SystemdPusher {
 		let ignored_types = self.ignored_types.clone();
 
 		let error_reporter = ErrorReporter::new(self);
+		let source = MonitorDataSource::extract(self);
 		let thread = try!(thread::Builder::new().spawn(move|| -> Result<(), InternalError> {
-			let rv = watch_units(&sender, which, ignored_types, error_reporter);
+			let rv = watch_units(&sender, &source, which, ignored_types, error_reporter);
 			match rv {
 				Ok(()) => Ok(()),
 				Err(e) => {
@@ -94,8 +94,8 @@ impl PushDataSource for SystemdPusher {
 							error: format!("failed to monitor systemd units: {}", e),
 						}),
 						scope: UpdateScope::Partial,
-						source: "TODO".to_string(),
-						typ: "TODO".to_string(),
+						source: source.id(),
+						typ: source.typ(),
 						time: Time::now(),
 					})), "Sending error event");
 					Err(e)
