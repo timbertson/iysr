@@ -63,7 +63,17 @@ impl<'a, 'stream> WriteSSE<'a, 'stream> {
 	fn emit_json<F>(&mut self, f: F) -> Result<(), json::EncoderError>
 		where F: FnOnce(&mut json::Encoder) -> Result<(), json::EncoderError>
 	{
-		let mut encoder = json::Encoder::new(self);
+		let mut encoder = json::Encoder::new_pretty(self);
+
+		match encoder.set_indent(0) {
+			Ok(()) => (),
+			Err(()) => {
+				// this is dumb, set_indent should return a compatible error
+				return Err(json::EncoderError::BadHashmapKey);
+				// return json::EncoderError::FmtError("couldn't set indent");
+			},
+		};
+
 		f(&mut encoder)
 	}
 
@@ -78,15 +88,25 @@ impl<'a, 'stream> WriteSSE<'a, 'stream> {
 
 impl<'a, 'stream> fmt::Write for WriteSSE<'a, 'stream> {
 	// XXX pretty lame buffer impl
-	fn write_str(&mut self, s: &str) -> fmt::Result {
+	fn write_str(&mut self, mut s: &str) -> fmt::Result {
 		let new_len = self.buffer.len() + s.len();
-		if new_len > 100 {
-			try!(match self.flush() {
-				Ok(()) => Ok(()),
-				Err(_) => Err(fmt::Error),
-			})
+		if new_len > 80 {
+			let mut parts = s.splitn(2, '\n');
+			let first = parts.next();
+			let second = parts.next();
+			match (first, second) {
+				(Some(line), Some(remainder)) => {
+					s = remainder;
+					self.buffer.push_str(line);
+					try!(match self.flush() {
+						Ok(()) => Ok(()),
+						Err(_) => Err(fmt::Error),
+					})
+				},
+				_ => (),
+			};
 		}
-		self.buffer.push_str(s);
+		self.buffer.push_str(s.replace("\n", "").deref());
 		Ok(())
 	}
 }

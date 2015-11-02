@@ -116,7 +116,7 @@ impl StateSnapshot {
 	}
 
 	fn values(&self) -> Vec<Arc<Update>> {
-		let mut state = self.state.lock().unwrap();
+		let state = self.state.lock().unwrap();
 		state.values().map(|update| update.clone()).collect()
 	}
 }
