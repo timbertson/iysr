@@ -296,6 +296,7 @@ impl<'a> DBusState<'a> {
 	fn emit(&self) -> Result<(), InternalError> {
 		try!(self.sender.send(Arc::new(Update {
 			source: format!("TODO"),
+			scope: UpdateScope::Snapshot,
 			typ: format!("TODO"),
 			time: Time::now(),
 			data: Data::State(self.state.clone()),

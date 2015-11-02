@@ -101,13 +101,39 @@ impl ThreadState {
 	}
 }
 
+struct StateSnapshot {
+	state: SharedRef<HashMap<String, Arc<Update>>>,
+}
+
+impl StateSnapshot {
+	fn new() -> StateSnapshot {
+		StateSnapshot { state: Arc::new(Mutex::new(HashMap::new())) }
+	}
+
+	fn update(&self, update: &Arc<Update>) {
+		let mut state = self.state.lock().unwrap();
+		state.insert(update.source.clone(), update.clone());
+	}
+
+	fn values(&self) -> Vec<Arc<Update>> {
+		let mut state = self.state.lock().unwrap();
+		state.values().map(|update| update.clone()).collect()
+	}
+}
+
+impl Clone for StateSnapshot {
+	fn clone(&self) -> StateSnapshot {
+		StateSnapshot { state : self.state.clone() }
+	}
+}
+
 pub struct SystemMonitor {
 	poll_time_ms: u32,
 	thread_state: ThreadState,
 	event_writable: mpsc::SyncSender<Arc<Update>>,
 	listeners: SharedRef<Listeners>,
 	push_sources: Vec<Box<PushDataSource>>,
-	last_state: SharedRef<Option<Vec<Arc<Update>>>>,
+	last_state: StateSnapshot,
 	subscriber_id: u32,
 }
 
@@ -142,7 +168,7 @@ impl SystemMonitor {
 			// XXX can we remove these ARCs? They could at least be Boxes, I think
 			listeners: Arc::new(Mutex::new(HashMap::new())),
 			push_sources: push_sources,
-			last_state: Arc::new(Mutex::new(None)),
+			last_state: StateSnapshot::new(),
 			event_writable: w,
 			thread_state: ThreadState::NotRunning(r, pull_sources),
 			subscriber_id: 0,
@@ -152,7 +178,7 @@ impl SystemMonitor {
 	fn poll_loop(
 			sleep_ms: u32,
 			pull_sources: Vec<Box<PullDataSource>>,
-			last_state: SharedRef<Option<Vec<Arc<Update>>>>,
+			last_state: StateSnapshot,
 			event_writable: mpsc::SyncSender<Arc<Update>>)
 	{
 		// XXX stop loop when last listener deregisters
@@ -175,27 +201,29 @@ impl SystemMonitor {
 					source: id,
 					typ: typ,
 					data: data,
+					scope: UpdateScope::Snapshot,
 				});
+				last_state.update(&data);
 				ignore_error!(event_writable.try_send(data.clone()), "sending poll result");
 				state.push(data);
 			}
-			{
-				// XXX update last_state from run_loop too
-				let mut last_state = last_state.lock().unwrap();
-				*last_state = Some(state);
-			};
 			thread::sleep_ms(sleep_ms);
 		}
 	}
 
 	fn run_loop(
 			event_readable: mpsc::Receiver<Arc<Update>>,
+			last_state: StateSnapshot,
 			listeners: SharedRef<Listeners>) -> Result<(), InternalError>
 	{
 		// XXX stop loop when last listener deregisters
 		loop {
 			let data : Arc<Update> = try!(event_readable.recv());
 			{
+				match data.scope {
+					UpdateScope::Partial => (),
+					UpdateScope::Snapshot => last_state.update(&data),
+				}
 				let listeners = listeners.lock().unwrap();
 				for listener in listeners.values() {
 					ignore_error!(listener.try_send(data.clone()), "sending data to listener");
@@ -207,22 +235,15 @@ impl SystemMonitor {
 	pub fn subscribe(&mut self) -> Result<Receiver<Arc<Update>>, InternalError> {
 		// XXX make this react to self.pull_sources.len()
 		let (sender, receiver) = mpsc::sync_channel(10);
-		let last_state = {
-			match *self.last_state.lock().unwrap() {
-				None => None,
-				Some(ref state) => Some(state.clone()),
+		{
+			let initial_states = self.last_state.values();
+			debug!("sending {} initial updates from last_state", initial_states.len());
+			debug!("initial_states: {:?}", initial_states);
+			for update in initial_states.iter() {
+				ignore_error!(sender.try_send(update.clone()), "sending initial state");
 			}
-		};
-		match last_state {
-			None => (),
-			Some(state) => {
-				debug!("sending {} initial updates from last_state", state.len());
-				debug!("last_state: {:?}", state);
-				for update in state.iter() {
-					ignore_error!(sender.try_send(update.clone()), "sending initial state");
-				}
-			}
-		};
+		}
+
 		let mut id;
 		{
 			let mut listeners = self.listeners.lock().unwrap();
@@ -271,13 +292,14 @@ impl SystemMonitor {
 				}
 				let event_writable = event_writable.clone();
 				let listeners = listeners.clone();
-				let last_state = last_state.clone();
+				let poll_last_state = last_state.clone();
+				let push_last_state = last_state.clone();
 				//let pull_sources : Vec<Box<PullDataSource>> = pull_sources.clone();
 				let poll_thread = try!(thread::Builder::new().spawn(move ||
-					Self::poll_loop(sleep_ms, pull_sources, last_state, event_writable)
+					Self::poll_loop(sleep_ms, pull_sources, poll_last_state, event_writable)
 				));
 				let event_thread = try!(thread::Builder::new().spawn(move ||
-					Self::run_loop(event_readable, listeners.clone())
+					Self::run_loop(event_readable, push_last_state, listeners.clone())
 				));
 				Ok(ThreadState::Running(event_thread, poll_thread, subscriptions))
 			}

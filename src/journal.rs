@@ -88,6 +88,7 @@ impl Journal {
 							id: Some("follow".to_string()),
 							error: format!("failed to follow journal logs: {}", e),
 						}),
+						scope: UpdateScope::Partial,
 						source: id.clone(),
 						typ: "journal".to_string(),
 						time: Time::now(),
@@ -171,6 +172,7 @@ impl Journal {
 					match event {
 						Some(event) => {
 							let update = Arc::new(Update {
+								scope: UpdateScope::Partial,
 								data: Data::Event(event),
 								source: id.clone(),
 								typ: "journal".to_string(),

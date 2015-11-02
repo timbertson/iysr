@@ -93,6 +93,7 @@ impl PushDataSource for SystemdPusher {
 							id: Some("sytemd".to_string()),
 							error: format!("failed to monitor systemd units: {}", e),
 						}),
+						scope: UpdateScope::Partial,
 						source: "TODO".to_string(),
 						typ: "TODO".to_string(),
 						time: Time::now(),

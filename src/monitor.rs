@@ -256,8 +256,16 @@ impl Encodable for Time {
 }
 
 #[derive(Debug)]
+pub enum UpdateScope {
+	Snapshot, // this update represents the entire latest state
+	          // (will be cached and sent to new subscribers)
+	Partial   // only a partial view of the state
+}
+
+#[derive(Debug)]
 pub struct Update {
 	pub source: String,
+	pub scope: UpdateScope,
 	pub typ: String,
 	pub time: Time,
 	pub data: Data,
@@ -315,6 +323,7 @@ impl ErrorReporter {
 					}),
 					source: self.id.clone(),
 					typ: self.typ.clone(),
+					scope: UpdateScope::Partial,
 					time: Time::now(),
 				})));
 				Ok(Err(e)) // we successfully reported an error. So the emitter is OK, but the underlying process failed.
