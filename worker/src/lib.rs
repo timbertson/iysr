@@ -11,6 +11,8 @@ use std::sync::mpsc;
 use std::io;
 use std::time::Duration;
 
+extern crate env_logger;
+
 #[macro_use]
 extern crate log;
 
