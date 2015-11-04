@@ -32,6 +32,8 @@ mod service;
 mod journal;
 mod config;
 mod filter;
+mod dbus_common;
+mod dbus_notify;
 
 pub use monitor::*;
 pub use system_monitor::*;

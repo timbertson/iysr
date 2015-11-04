@@ -18,12 +18,10 @@ use monitor::*;
 use config::SystemdConfig;
 use util::read_all;
 use dbus::{Connection,BusType,Message,MessageItem,MessageType,Props,ConnectionItem,Path};
+use super::dbus_common::*;
 use super::errors::*;
 use super::systemd_common::*;
 extern crate dbus;
-
-coerce_to_internal_error!(dbus::Error);
-
 
 const SYSTEMD_DBUS_PATH: &'static str = "/org/freedesktop/systemd1";
 const SYSTEMD_DBUS_DEST: &'static str = "org.freedesktop.systemd1";
@@ -31,7 +29,6 @@ const SYSTEMD_MANAGER_IFACE: &'static str = "org.freedesktop.systemd1.Manager";
 const DBUS_PROPERTIES_IFACE: &'static str = "org.freedesktop.DBus.Properties";
 const DBUS_ROOT_IFACE: &'static str = "org.freedesktop.DBus";
 const SYSTEMD_UNIT_IFACE: &'static str = "org.freedesktop.systemd1.Unit";
-const DBUS_CALL_TIMEOUT: i32 = 1000 * 60;
 const UNIT_ADDED: &'static str = "UnitNew";
 const UNIT_REMOVED: &'static str = "UnitRemoved";
 const RELOADING: &'static str = "Reloading";
@@ -49,13 +46,6 @@ fn safe_remove<T>(vec: &mut Vec<T>, idx: usize) -> Option<T> {
 fn method_call(name: &str) -> Result<Message,InternalError> {
 		Message::new_method_call(SYSTEMD_DBUS_DEST, SYSTEMD_DBUS_PATH, SYSTEMD_MANAGER_IFACE, name)
 			.or(Err(InternalError::new(format!("Failed to create method call"))))
-}
-
-fn call_method(conn: &Connection, call: Message) -> Result<Message, dbus::Error> {
-	let mut rv = try!(conn.send_with_reply_and_block(call, DBUS_CALL_TIMEOUT));
-	// fail on a successful response which contains an error
-	try!(rv.as_result());
-	Ok(rv)
 }
 
 // A bit lame. headers contains Option<String>, but we can't match on those
