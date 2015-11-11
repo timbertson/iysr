@@ -10,6 +10,7 @@ use std::error::Error;
 use std::sync::mpsc;
 use std::io;
 use std::time::Duration;
+use std::sync::{Arc,Mutex};
 
 extern crate env_logger;
 
@@ -39,6 +40,7 @@ enum WorkerState {
 	Detached, // will panic! on error
 }
 
+// XXX LinkedSpawn is not object-safe, which makes it a bit useless.
 pub trait LinkedSpawn {
 	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
@@ -47,18 +49,23 @@ pub trait LinkedSpawn {
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
 }
 
+struct WorkerShared {
+	signal: mpsc::Sender<()>,
+	children: Vec<Arc<Mutex<WorkerShared>>>,
+}
+
 #[must_use = "worker will be immediately joined if `Worker` is not used"]
 pub struct Worker<E:Send+'static> {
 	thread: Option<JoinHandle<Result<(),E>>>,
-	signal: mpsc::Sender<()>,
 	work_ended: mpsc::Receiver<()>,
 	state: WorkerState,
+	shared: Arc<Mutex<WorkerShared>>,
 }
 
 pub struct WorkerSelf {
 	receiver: mpsc::Receiver<()>,
-	signal: mpsc::Sender<()>,
 	name: Option<String>,
+	shared: Arc<Mutex<WorkerShared>>,
 }
 
 pub enum WorkerError<E> {
@@ -107,17 +114,16 @@ impl WorkerSelf {
 	pub fn spawn<F,E2>(&self, name: String, work: F) -> Result<Worker<E2>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), Some(name), work)
+		_spawn(Some(self.shared.clone()), Some(name), work)
 	}
 
 	pub fn spawn_anon<F,E2>(&self, work: F) -> Result<Worker<E2>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), None, work)
+		_spawn(Some(self.shared.clone()), None, work)
 	}
 
 	pub fn tick(&self) -> Result<(),TickError> {
-		// XXX should return `Cancelled`, not Disconnected
 		println!("debug: {}: tick()", self.name());
 		match self.receiver.try_recv() {
 			Err(mpsc::TryRecvError::Empty) => Ok(()),
@@ -125,6 +131,15 @@ impl WorkerSelf {
 			Ok(()) => Err(TickError::Cancelled),
 		}
 	}
+
+	pub fn await_cancel(&self) -> () {
+		println!("debug: {}: await_cancel()", self.name());
+		match self.receiver.recv() {
+			Ok(()) => (),
+			Err(mpsc::RecvError) => (),
+		}
+	}
+
 
 	fn name(&self) -> String {
 		// XXX do this without copying
@@ -135,13 +150,30 @@ impl WorkerSelf {
 	}
 }
 
-fn _spawn<E, F>(signal_parent: Option<mpsc::Sender<()>>, name: Option<String>, work: F) -> Result<Worker<E>, io::Error>
+fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared>>>, name: Option<String>, work: F) -> Result<Worker<E>, io::Error>
 	where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send+'static
 {
 	// let signal_parent = parent.map(|p| p.signal.clone());
 	let (sender, receiver) = mpsc::channel();
-	let self_thread = WorkerSelf {
+	let shared = Arc::new(Mutex::new(WorkerShared {
+		children: Vec::new(),
 		signal: sender.clone(),
+	}));
+	match parent {
+		Some(ref parent) => {
+			match parent.lock() {
+				Ok(ref mut parent) => {
+					parent.children.push(shared.clone());
+				},
+				Err(_) => {
+					return Err(io::Error::new(io::ErrorKind::Other, "failed to acquire mutex"));
+				}
+			};
+		},
+		None => (),
+	}
+	let self_thread = WorkerSelf {
+		shared: shared.clone(),
 		name: name.clone(),
 		receiver: receiver,
 	};
@@ -160,21 +192,39 @@ fn _spawn<E, F>(signal_parent: Option<mpsc::Sender<()>>, name: Option<String>, w
 		match result {
 			Ok(()) => Ok(()),
 			Err(e) => {
-				match signal_parent {
-					// ignore send failure - it just means the parent has already ended
-					Some(s) => {
-						let _:Result<(),mpsc::SendError<()>> = s.send(());
-						()
+				match parent {
+					Some(parent) => {
+						// ignore send or unlock failure - it just means the parent has already ended
+						match parent.lock() {
+							Ok(ref mut parent) => {
+								let _:Result<(),mpsc::SendError<()>> = parent.signal.send(());
+								loop {
+									// XXX use drain when stable
+									match parent.children.pop() {
+										Some(child) => {
+											match child.lock() {
+												Ok(child) => {
+													let _:Result<(),mpsc::SendError<()>> = child.signal.send(());
+												},
+												Err(_) => (),
+											}
+										},
+										None => { break; }
+									}
+								}
+							},
+							Err(_) => (),
+						}
 					},
 					None => (),
-				}
+				};
 				Err(e)
 			},
 		}
 	}));
 	Ok(Worker {
 		thread: Some(thread),
-		signal: sender,
+		shared: shared,
 		work_ended: done_receiver,
 		state: WorkerState::Running,
 	})
@@ -196,16 +246,17 @@ impl<E:Send + 'static> Worker<E> {
 	pub fn spawn<F,E2>(&self, name: String, work: F) -> Result<Worker<E2>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), Some(name), work)
+		_spawn(Some(self.shared.clone()), Some(name), work)
 	}
 
 	pub fn spawn_anon<F,E2>(&self, work: F) -> Result<Worker<E2>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), None, work)
+		_spawn(Some(self.shared.clone()), None, work)
 	}
 
 	pub fn wait(&mut self) -> Result<(),WorkerError<E>> {
+		// XXX wait for all children first
 		// XXX this is premature - if join() panics,
 		// guess we end up with an orphaned thread. Can that happen?
 		self.state = WorkerState::Ended;
@@ -251,6 +302,7 @@ impl<E:Send + 'static> Worker<E> {
 	}
 
 	pub fn detach(&mut self) {
+		// XXX detach from parent
 		self.state = match self.state {
 			WorkerState::Running => WorkerState::Detached,
 			WorkerState::Ended => WorkerState::Ended,
@@ -259,13 +311,20 @@ impl<E:Send + 'static> Worker<E> {
 	}
 
 	pub fn terminate(&mut self) -> Result<(),WorkerError<E>> {
-		match self.signal.send(()) {
-			Ok(()) => (),
-			Err(_) => {
-				return Err(WorkerError::Aborted("failed to send terminate()".to_string()));
+		fn err<E>() -> WorkerError<E> {
+			return WorkerError::Aborted("failed to send terminate()".to_string());
+		}
+		let sent = match self.shared.lock() {
+			Ok(shared) => match shared.signal.send(()) {
+				Ok(()) => Ok(()),
+				Err(_) => Err(err()),
 			},
+			Err(_) => Err(err()),
 		};
-		self.wait()
+		match sent {
+			Ok(()) => self.wait(),
+			Err(e) => Err(e),
+		}
 	}
 }
 
@@ -291,13 +350,13 @@ impl<T:Send> LinkedSpawn for Worker<T> {
 	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), Some(name), work)
+		_spawn(Some(self.shared.clone()), Some(name), work)
 	}
 
 	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), None, work)
+		_spawn(Some(self.shared.clone()), None, work)
 	}
 }
 
@@ -305,13 +364,13 @@ impl LinkedSpawn for WorkerSelf {
 	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), Some(name), work)
+		_spawn(Some(self.shared.clone()), Some(name), work)
 	}
 
 	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
 	{
-		_spawn(Some(self.signal.clone()), None, work)
+		_spawn(Some(self.shared.clone()), None, work)
 	}
 }
 

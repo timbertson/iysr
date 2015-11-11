@@ -20,9 +20,10 @@ use schedule_recv;
 use rustc_serialize::json;
 use rustc_serialize::json::Json;
 use rustc_serialize::{Encodable, Encoder};
+use worker::{Worker,WorkerSelf};
 
 struct Server {
-	monitor: Mutex<Box<SystemMonitor>>,
+	monitor: Arc<Mutex<SystemMonitor>>,
 }
 
 fn write_sse_end(dest: &mut io::Write) -> io::Result<()> {
@@ -238,12 +239,18 @@ impl Handler for Server {
 	}
 }
 
-pub fn main(monitor: SystemMonitor) -> Result<(),InternalError> {
-	let server = Server { monitor: Mutex::new(Box::new(monitor)), };
+pub fn main(monitor: Arc<Mutex<SystemMonitor>>, parent: &WorkerSelf) -> Result<worker::Worker<InternalError>,InternalError> {
+	let server = Server { monitor: monitor };
 	match hyper::Server::http("127.0.0.1:3000").and_then(|s| s.handle(server)) {
-		Ok(_) => {
+		Ok(mut server) => {
 			errln!("Server listening on port 3000");
-			Ok(())
+			parent.spawn("http-server".into(), move |t:worker::WorkerSelf| {
+				t.await_cancel();
+				match server.close() {
+					Ok(()) => Ok(()),
+					Err(e) => Err(InternalError::from(e)), // e.into(),
+				}
+			}).map_err(|e| e.into())
 		},
 		Err(e) => Err(InternalError::new(format!("Server failed to start: {}", e))),
 	}

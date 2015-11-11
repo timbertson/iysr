@@ -66,6 +66,7 @@ impl DbusNotify {
 			Some(i) => i,
 		};
 		let mut method = try!(method_call(NOTIFY_SHOW_METHOD));
+		let actions: &[&str] = &[];
 		method.append_items(&[
 			// STRING app_name;
 			MessageItem::Str("iysr".into()),
@@ -83,7 +84,8 @@ impl DbusNotify {
 			MessageItem::Str(self.body.clone()),
 
 			// ARRAY actions;
-			MessageItem::Array(vec!(), MessageItem::Str("".into()).type_sig()),
+			// MessageItem::Array(vec!(), MessageItem::Str("".into()).type_sig()),
+			actions.into(),
 
 			// DICT hints;
 			MessageItem::Array(vec!(), MessageItem::DictEntry(
@@ -120,7 +122,7 @@ impl DbusNotify {
 				try!(call_method(conn, method));
 				Ok(())
 			},
-		};
+		}
 	}
 }
 

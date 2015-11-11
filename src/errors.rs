@@ -1,4 +1,5 @@
 extern crate chrono;
+extern crate hyper;
 
 use std::collections::{HashMap,BTreeMap};
 use std::error::{Error};
@@ -70,6 +71,7 @@ coerce_to_internal_error!(
 	, string::FromUtf8Error
 	, json::EncoderError
 	, chrono::format::ParseError
+	, hyper::error::Error
 );
 coerce_to_internal_error!(
 	  generic(mpsc::SendError<T>, T)

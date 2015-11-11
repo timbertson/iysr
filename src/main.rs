@@ -37,6 +37,7 @@ mod dbus_notify;
 
 pub use monitor::*;
 pub use system_monitor::*;
+use errors::InternalError;
 use systemd::*;
 use journal::*;
 use std::sync::{Arc,Mutex};
@@ -71,13 +72,21 @@ fn run(config: Config) -> Result<(), errors::InternalError> {
 		}
 	}
 
-	let monitor = try!(SystemMonitor::new(
+	// XXX with scoped threads, we could get away with a ref instead of Arc
+	let monitor = Arc::new(Mutex::new(try!(SystemMonitor::new(
 		20000,
 		50,
 		pull_sources,
 		push_sources
-	));
-	service::main(monitor)
+	))));
+
+	let mut reaper = try!(worker::spawn("reaper".into(), |t| {
+		let mut services : Vec<worker::Worker<InternalError>> = Vec::new();
+		services.push(try!(service::main(monitor, &t)));
+		t.await_cancel();
+		Err(InternalError::new("reaper cancelled"))
+	}));
+	reaper.wait().map_err(|e| e.into())
 }
 
 
