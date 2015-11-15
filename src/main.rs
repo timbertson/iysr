@@ -84,7 +84,7 @@ fn run(config: Config) -> Result<(), errors::InternalError> {
 		let mut services : Vec<worker::Worker<InternalError>> = Vec::new();
 		services.push(try!(service::main(monitor, &t)));
 		t.await_cancel();
-		Err(InternalError::new("reaper cancelled"))
+		Err(InternalError::new("reaper cancelled".into()))
 	}));
 	reaper.wait().map_err(|e| e.into())
 }

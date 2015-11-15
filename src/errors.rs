@@ -16,7 +16,7 @@ use chrono::{DateTime,UTC};
 use chrono::Timelike;
 use worker::{WorkerError,TickError};
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct InternalError {
 	pub reason: String,
 }
@@ -90,7 +90,7 @@ impl convert::From<WorkerError<InternalError>> for InternalError {
 	fn from(err: WorkerError<InternalError>) -> InternalError {
 		match err {
 			WorkerError::Cancelled => InternalError::new(String::from("worker cancelled")),
-			WorkerError::Failed(e) => e,
+			WorkerError::Failed(e) => (*e).clone(),
 			WorkerError::Aborted(reason) => InternalError::new(reason),
 		}
 	}
@@ -100,6 +100,7 @@ impl convert::From<TickError> for InternalError {
 	fn from(err: TickError) -> InternalError {
 		match err {
 			TickError::Cancelled => InternalError::new(String::from("worker cancelled")),
+			TickError::Aborted(reason) => InternalError::new(format!("worker aborted: {}", reason)),
 		}
 	}
 }

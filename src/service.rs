@@ -239,12 +239,12 @@ impl Handler for Server {
 	}
 }
 
-pub fn main(monitor: Arc<Mutex<SystemMonitor>>, parent: &WorkerSelf) -> Result<worker::Worker<InternalError>,InternalError> {
+pub fn main(monitor: Arc<Mutex<SystemMonitor>>, parent: &WorkerSelf<InternalError>) -> Result<worker::Worker<InternalError>,InternalError> {
 	let server = Server { monitor: monitor };
 	match hyper::Server::http("127.0.0.1:3000").and_then(|s| s.handle(server)) {
 		Ok(mut server) => {
 			errln!("Server listening on port 3000");
-			parent.spawn("http-server".into(), move |t:worker::WorkerSelf| {
+			parent.spawn("http-server".into(), move |t:worker::WorkerSelf<InternalError>| {
 				t.await_cancel();
 				match server.close() {
 					Ok(()) => Ok(()),
