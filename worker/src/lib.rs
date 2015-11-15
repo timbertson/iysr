@@ -256,12 +256,27 @@ impl<E:Send + 'static> Worker<E> {
 	}
 
 	pub fn wait(&mut self) -> Result<(),WorkerError<E>> {
-		// XXX wait for all children first
-		// XXX this is premature - if join() panics,
-		// guess we end up with an orphaned thread. Can that happen?
-		self.state = WorkerState::Ended;
-		match self.thread.take() {
-			None => Ok(()), // already waited
+		match self.shared.lock() {
+			Ok(shared) => {
+				loop {
+					match shared.children.pop() {
+						Some(child) => {
+							// child is already dead if this fails,
+							// so no error reporting required
+							let _:Result<(), mpsc::SendError<()>> = done_sender.send(());
+						},
+						None => { break; }
+					}
+				}
+			},
+			Err(_) => {
+				return Err(WorkerError::Aborted("failed to unlock shared state".into()));
+			},
+		};
+		let state = match self.thread.take() {
+			None => Err(
+				WorkerError::Aborted("worker.wait() called multiple times".into())
+			),
 			Some(t) => {
 				match t.join() {
 					Ok(Ok(())) => Ok(()),
@@ -272,7 +287,9 @@ impl<E:Send + 'static> Worker<E> {
 					},
 				}
 			}
-		}
+		};
+		self.state = WorkerState::Ended;
+		state
 	}
 
 	fn name(&self) -> String {
@@ -291,6 +308,7 @@ impl<E:Send + 'static> Worker<E> {
 			Ok(()) => true,
 			Err(mpsc::TryRecvError::Empty) => false,
 			Err(e) => {
+				self.state = WorkerState::Ended;
 				return Err(WorkerError::Aborted(format!("poll() failed: {:?}", e)));
 			},
 		};
