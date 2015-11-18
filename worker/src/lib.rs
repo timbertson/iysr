@@ -49,16 +49,69 @@ pub trait LinkedSpawn {
 		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
 }
 
-struct WorkerShared {
+struct WorkerShared<E> {
+	// XXX check deadlocks with parent/child interactions
 	signal: mpsc::Sender<()>,
 	children: Vec<Arc<Mutex<WorkerShared>>>,
+	thread: Option<JoinHandle<Result<(),E>>>,
+	// XXX if T is clone(), we wouldn't need Arc
+	result: Option<Result<(),Arc<WorkerError<E>>>>,
+}
+
+impl WorkerShared<E> {
+	fn wait(&mut self) -> Result<(),WorkerError<E>> {
+		match self.result {
+			// check for already done
+			Some(r) => { return r; },
+			None => (),
+		};
+
+		// try to signal all children
+		self.children = self.children.filter(|child| {
+			match child.signal.send(()) {
+				Ok(()) => true,
+				// XXX this should be reported, but as a lower priority
+				// than known errors
+				Err(_) => false,
+			}
+		});
+
+		// check our _own_ state
+		let state = match self.thread.take() {
+			None => Err(
+				WorkerError::Aborted("worker.wait() called multiple times".into())
+			),
+			Some(t) => {
+				match t.join() {
+					Ok(Ok(())) => Ok(()),
+					Ok(Err(e)) => Err(Arc::new(WorkerError::Failed(e))),
+					Err(ref e) => {
+						let desc = format!("Thread panic: {:?}", e);
+						Err(Arc::new(WorkerError::Aborted(desc)))
+					},
+				}
+			}
+		};
+
+		// then wait on the children we signalled
+		loop {
+			// XXX use drain() when stable
+			match self.children.pop() {
+				Some(child) => {
+					state = state.and(child.wait());
+				},
+				None => { break; }
+			}
+		};
+
+		self.state = state.clone();
+		state
+	}
 }
 
 #[must_use = "worker will be immediately joined if `Worker` is not used"]
 pub struct Worker<E:Send+'static> {
-	thread: Option<JoinHandle<Result<(),E>>>,
 	work_ended: mpsc::Receiver<()>,
-	state: WorkerState,
 	shared: Arc<Mutex<WorkerShared>>,
 }
 
@@ -257,39 +310,11 @@ impl<E:Send + 'static> Worker<E> {
 
 	pub fn wait(&mut self) -> Result<(),WorkerError<E>> {
 		match self.shared.lock() {
-			Ok(shared) => {
-				loop {
-					match shared.children.pop() {
-						Some(child) => {
-							// child is already dead if this fails,
-							// so no error reporting required
-							let _:Result<(), mpsc::SendError<()>> = done_sender.send(());
-						},
-						None => { break; }
-					}
-				}
-			},
+			Ok(shared) => shared.wait(),
 			Err(_) => {
-				return Err(WorkerError::Aborted("failed to unlock shared state".into()));
+				Err(WorkerError::Aborted("failed to unlock shared state".into()));
 			},
-		};
-		let state = match self.thread.take() {
-			None => Err(
-				WorkerError::Aborted("worker.wait() called multiple times".into())
-			),
-			Some(t) => {
-				match t.join() {
-					Ok(Ok(())) => Ok(()),
-					Ok(Err(e)) => Err(WorkerError::Failed(e)),
-					Err(ref e) => {
-						let desc = format!("Thread panic: {:?}", e);
-						Err(WorkerError::Aborted(desc))
-					},
-				}
-			}
-		};
-		self.state = WorkerState::Ended;
-		state
+		}
 	}
 
 	fn name(&self) -> String {
