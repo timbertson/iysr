@@ -10,7 +10,7 @@ use std::error::Error;
 use std::sync::mpsc;
 use std::io;
 use std::time::Duration;
-use std::sync::{Arc,Mutex};
+use std::sync::{Arc,Mutex,PoisonError,MutexGuard};
 
 extern crate env_logger;
 
@@ -34,31 +34,42 @@ impl<T> OptionExt<T> for Option<T> {
 	}
 }
 
-enum WorkerState {
-	Running,
-	Ended,
-	Detached, // will panic! on error
-}
-
 // XXX LinkedSpawn is not object-safe, which makes it a bit useless.
-pub trait LinkedSpawn {
-	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
-
-	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
-}
+// pub trait LinkedSpawn {
+// 	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
+// 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
+//
+// 	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
+// 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
+// }
 
 struct WorkerShared<E> {
 	// XXX check deadlocks with parent/child interactions
 	signal: mpsc::Sender<()>,
-	children: Vec<Arc<Mutex<WorkerShared>>>,
+	children: Vec<Arc<Mutex<WorkerShared<E>>>>,
 	thread: Option<JoinHandle<Result<(),E>>>,
 	// XXX if T is clone(), we wouldn't need Arc
-	result: Option<Result<(),Arc<WorkerError<E>>>>,
+	result: Option<Result<(),WorkerError<E>>>,
+	parent: Option<Arc<Mutex<WorkerShared<E>>>>,
+	detached: bool,
 }
 
-impl WorkerShared<E> {
+impl<E> WorkerShared<E> {
+	fn add_child(&mut self, child: Arc<Mutex<WorkerShared<E>>>) {
+		self.children.push(child);
+	}
+
+	fn detach(&mut self) -> Result<(), TickError> {
+		self.detached = true;
+		match self.parent {
+			None => (),
+			Some(ref _parent) => {
+				// TODO: remove child (need to index by ID or something?)
+			},
+		};
+		Ok(())
+	}
+
 	fn wait(&mut self) -> Result<(),WorkerError<E>> {
 		match self.result {
 			// check for already done
@@ -66,15 +77,22 @@ impl WorkerShared<E> {
 			None => (),
 		};
 
+		let mut low_priority_error = Ok(());
+		let cannot_unlock = || {
+			low_priority_error = Err(WorkerError::Aborted("could not unlock child state".into()))
+		};
+
 		// try to signal all children
-		self.children = self.children.filter(|child| {
-			match child.signal.send(()) {
-				Ok(()) => true,
-				// XXX this should be reported, but as a lower priority
-				// than known errors
-				Err(_) => false,
+		self.children = self.children.into_iter().filter(|child| {
+			match child.lock() {
+				Ok(child) =>
+					match child.signal.send(()) {
+						Ok(()) => true,
+						Err(_) => { cannot_unlock(); false },
+					},
+				Err(_) => { cannot_unlock(); false },
 			}
-		});
+		}).collect();
 
 		// check our _own_ state
 		let state = match self.thread.take() {
@@ -84,10 +102,10 @@ impl WorkerShared<E> {
 			Some(t) => {
 				match t.join() {
 					Ok(Ok(())) => Ok(()),
-					Ok(Err(e)) => Err(Arc::new(WorkerError::Failed(e))),
+					Ok(Err(e)) => Err(WorkerError::Failed(Arc::new(e))),
 					Err(ref e) => {
 						let desc = format!("Thread panic: {:?}", e);
-						Err(Arc::new(WorkerError::Aborted(desc)))
+						Err(WorkerError::Aborted(desc))
 					},
 				}
 			}
@@ -98,37 +116,67 @@ impl WorkerShared<E> {
 			// XXX use drain() when stable
 			match self.children.pop() {
 				Some(child) => {
-					state = state.and(child.wait());
+					match child.lock() {
+						Ok(child) => {
+							state = state.and(child.wait());
+						},
+						Err(_) => cannot_unlock(),
+					}
 				},
 				None => { break; }
 			}
 		};
 
-		self.state = state.clone();
+		state = state.and(low_priority_error);
+		self.result = Some(state.clone());
 		state
 	}
 }
 
 #[must_use = "worker will be immediately joined if `Worker` is not used"]
-pub struct Worker<E:Send+'static> {
+pub struct Worker<E:Send+Sync+'static> {
 	work_ended: mpsc::Receiver<()>,
-	shared: Arc<Mutex<WorkerShared>>,
+	shared: Arc<Mutex<WorkerShared<E>>>,
+	name: Option<String>,
 }
 
-pub struct WorkerSelf {
+pub struct WorkerSelf<E> {
 	receiver: mpsc::Receiver<()>,
 	name: Option<String>,
-	shared: Arc<Mutex<WorkerShared>>,
+	shared: Arc<Mutex<WorkerShared<E>>>,
 }
 
 pub enum WorkerError<E> {
 	Cancelled,
-	Failed(E),
+	Failed(Arc<E>),
 	Aborted(String),
 }
 
 pub enum TickError {
 	Cancelled,
+	Aborted(String),
+}
+
+impl<E> Clone for WorkerError<E> {
+	fn clone(&self) -> WorkerError<E> {
+		match *self {
+			WorkerError::Cancelled => WorkerError::Cancelled,
+			WorkerError::Aborted(s) => WorkerError::Aborted(s.clone()),
+			WorkerError::Failed(e) => WorkerError::Failed(e.clone()),
+		}
+	}
+}
+
+impl<'a, T> convert::From<PoisonError<MutexGuard<'a, T>>> for TickError {
+	fn from(err: PoisonError<MutexGuard<T>>) -> TickError {
+		TickError::Aborted("failed to acquire lock".into())
+	}
+}
+
+impl<'a, T, E> convert::From<PoisonError<MutexGuard<'a, T>>> for WorkerError<E> {
+	fn from(err: PoisonError<MutexGuard<T>>) -> WorkerError<E> {
+		WorkerError::Aborted("failed to acquire lock".into())
+	}
 }
 
 impl<E:fmt::Debug> convert::From<WorkerError<E>> for io::Error {
@@ -137,10 +185,22 @@ impl<E:fmt::Debug> convert::From<WorkerError<E>> for io::Error {
 	}
 }
 
+// impl convert::From<WorkerError<io::Error>> for io::Error {
+// 	fn from(err: WorkerError<io::Error>) -> io::Error {
+// 		match err {
+// 			WorkerError::Failed(e) => e,
+// 			WorkerError::Aborted(s) => io::Error::new(io::ErrorKind::Other, s),
+// 			WorkerError::Cancelled =>
+// 				io::Error::new(io::ErrorKind::Other, "thread cancelled"),
+// 		}
+// 	}
+// }
+
 impl convert::From<TickError> for io::Error {
 	fn from(err: TickError) -> io::Error {
 		match err {
 			TickError::Cancelled => io::Error::new(io::ErrorKind::Other, "thread cancelled"),
+			TickError::Aborted(e) => io::Error::new(io::ErrorKind::Other, e),
 		}
 	}
 }
@@ -149,6 +209,7 @@ impl<E> convert::From<TickError> for WorkerError<E> {
 	fn from(err: TickError) -> WorkerError<E> {
 		match err {
 			TickError::Cancelled => WorkerError::Cancelled,
+			TickError::Aborted(e) => WorkerError::Aborted(e),
 		}
 	}
 }
@@ -163,15 +224,15 @@ impl<E:fmt::Debug> fmt::Debug for WorkerError<E> {
 	}
 }
 
-impl WorkerSelf {
-	pub fn spawn<F,E2>(&self, name: String, work: F) -> Result<Worker<E2>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
+impl<E> WorkerSelf<E> {
+	pub fn spawn<F>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
+		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + Sync + 'static
 	{
 		_spawn(Some(self.shared.clone()), Some(name), work)
 	}
 
-	pub fn spawn_anon<F,E2>(&self, work: F) -> Result<Worker<E2>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
+	pub fn spawn_anon<F>(&self, work: F) -> Result<Worker<E>, io::Error>
+		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + Sync + 'static
 	{
 		_spawn(Some(self.shared.clone()), None, work)
 	}
@@ -203,49 +264,29 @@ impl WorkerSelf {
 	}
 }
 
-fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared>>>, name: Option<String>, work: F) -> Result<Worker<E>, io::Error>
-	where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send+'static
+fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared<E>>>>, name: Option<String>, work: F) -> Result<Worker<E>, io::Error>
+	where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send+Sync+'static
 {
-	// let signal_parent = parent.map(|p| p.signal.clone());
 	let (sender, receiver) = mpsc::channel();
-	let shared = Arc::new(Mutex::new(WorkerShared {
-		children: Vec::new(),
-		signal: sender.clone(),
-	}));
-	match parent {
-		Some(ref parent) => {
-			match parent.lock() {
-				Ok(ref mut parent) => {
-					parent.children.push(shared.clone());
-				},
-				Err(_) => {
-					return Err(io::Error::new(io::ErrorKind::Other, "failed to acquire mutex"));
-				}
-			};
-		},
-		None => (),
-	}
-	let self_thread = WorkerSelf {
-		shared: shared.clone(),
-		name: name.clone(),
-		receiver: receiver,
-	};
-
 	let (done_sender, done_receiver) = mpsc::channel();
+	let (self_thread_sender, self_thread_receiver) = mpsc::channel();
 
 	let builder = thread::Builder::new();
 	let builder = match name {
 		None => builder,
 		Some(name) => builder.name(name),
 	};
+
+	let thread_parent = parent.clone();
 	let thread = try!(builder.spawn(move || {
+		let self_thread : WorkerSelf<E> = self_thread_receiver.recv().unwrap();
 		let result = work(self_thread);
 		// XXX check race between end.send() and sendError?
 		let _:Result<(), mpsc::SendError<()>> = done_sender.send(());
 		match result {
 			Ok(()) => Ok(()),
 			Err(e) => {
-				match parent {
+				match thread_parent {
 					Some(parent) => {
 						// ignore send or unlock failure - it just means the parent has already ended
 						match parent.lock() {
@@ -275,35 +316,65 @@ fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared>>>, name: Option<String>, 
 			},
 		}
 	}));
-	Ok(Worker {
+
+	let shared = Arc::new(Mutex::new(WorkerShared {
+		children: Vec::new(),
+		signal: sender.clone(),
+		result: None,
 		thread: Some(thread),
+		parent: parent,
+		detached: false,
+	}));
+
+	let self_thread = WorkerSelf {
+		shared: shared.clone(),
+		name: name.clone(),
+		receiver: receiver,
+	};
+	self_thread_sender.send(self_thread);
+
+	match parent {
+		Some(ref parent) => {
+			match parent.lock() {
+				Ok(ref mut parent) => {
+					parent.add_child(shared.clone());
+				},
+				Err(_) => {
+					return Err(io::Error::new(io::ErrorKind::Other, "failed to acquire mutex"));
+				}
+			};
+		},
+		None => (),
+	}
+
+	Ok(Worker {
+		name: name.clone(),
 		shared: shared,
 		work_ended: done_receiver,
-		state: WorkerState::Running,
 	})
 }
 
 pub fn spawn<F,E>(name: String, work: F) -> Result<Worker<E>, io::Error>
-	where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send+'static
+	where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send+ Sync +'static
 {
 	_spawn(None, Some(name), work)
 }
 
 pub fn spawn_anon<F,E>(work: F) -> Result<Worker<E>, io::Error>
-	where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send+'static
+	where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send+ Sync +'static
 {
 	_spawn(None, None, work)
 }
 
-impl<E:Send + 'static> Worker<E> {
-	pub fn spawn<F,E2>(&self, name: String, work: F) -> Result<Worker<E2>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
+impl<E:Send + Sync + 'static> Worker<E> {
+	pub fn spawn<F>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
+		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static
 	{
 		_spawn(Some(self.shared.clone()), Some(name), work)
 	}
 
-	pub fn spawn_anon<F,E2>(&self, work: F) -> Result<Worker<E2>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E2>, F: Send + 'static, E2: Send + 'static
+	pub fn spawn_anon<F>(&self, work: F) -> Result<Worker<E>, io::Error>
+		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static
 	{
 		_spawn(Some(self.shared.clone()), None, work)
 	}
@@ -311,15 +382,14 @@ impl<E:Send + 'static> Worker<E> {
 	pub fn wait(&mut self) -> Result<(),WorkerError<E>> {
 		match self.shared.lock() {
 			Ok(shared) => shared.wait(),
-			Err(_) => {
-				Err(WorkerError::Aborted("failed to unlock shared state".into()));
-			},
+			Err(_) => Err(WorkerError::Aborted(
+					"failed to unlock shared state".into())),
 		}
 	}
 
 	fn name(&self) -> String {
 		// XXX do this without copying :(
-		match self.thread.bind(|t| t.thread().name().map(|s|s.to_string())) {
+		match self.name.map(|s|s.to_string()) {
 			Some(n) => n,
 			None => "<unnamed>".to_string(),
 		}
@@ -333,7 +403,6 @@ impl<E:Send + 'static> Worker<E> {
 			Ok(()) => true,
 			Err(mpsc::TryRecvError::Empty) => false,
 			Err(e) => {
-				self.state = WorkerState::Ended;
 				return Err(WorkerError::Aborted(format!("poll() failed: {:?}", e)));
 			},
 		};
@@ -344,78 +413,79 @@ impl<E:Send + 'static> Worker<E> {
 		}
 	}
 
-	pub fn detach(&mut self) {
-		// XXX detach from parent
-		self.state = match self.state {
-			WorkerState::Running => WorkerState::Detached,
-			WorkerState::Ended => WorkerState::Ended,
-			WorkerState::Detached => WorkerState::Detached,
-		};
+	pub fn detach(&mut self) -> Result<(), TickError> {
+		// TODO: detach will ignore errors, they should probably panic!
+		let shared = try!(self.shared.lock());
+		shared.detach()
 	}
 
 	pub fn terminate(&mut self) -> Result<(),WorkerError<E>> {
 		fn err<E>() -> WorkerError<E> {
-			return WorkerError::Aborted("failed to send terminate()".to_string());
+			WorkerError::Aborted("failed to send terminate()".to_string())
 		}
-		let sent = match self.shared.lock() {
+		match self.shared.lock() {
 			Ok(shared) => match shared.signal.send(()) {
-				Ok(()) => Ok(()),
+				Ok(()) => self.wait(),
 				Err(_) => Err(err()),
 			},
 			Err(_) => Err(err()),
-		};
-		match sent {
-			Ok(()) => self.wait(),
-			Err(e) => Err(e),
 		}
 	}
 }
 
-impl<E:Send+'static> Drop for Worker<E> {
+impl<E:Send+Sync+'static> Drop for Worker<E> {
 	fn drop(&mut self) {
-		match self.state {
-			WorkerState::Running => {
-				warn!("thread dropped without `detach` or `wait()`");
-				match self.terminate() {
-					Err(_) => (), // already dead
-					Ok(()) => match self.wait() {
-						Ok(()) => (),
-						Err(_) => error!("thread failed during drop()"),
-					},
+		match self.shared.lock() {
+			Ok(shared) => {
+				if (!shared.detached) {
+					match shared.result {
+						Some(_) => (),
+						None => {
+							warn!("thread dropped without `detach` or `wait()`");
+							match self.terminate() {
+								Err(_) => (), // already dead
+								Ok(()) => match self.wait() {
+									Ok(()) => (),
+									Err(_) => error!("thread failed during drop()"),
+								},
+							}
+						}
+					}
 				}
 			},
-			WorkerState::Detached | WorkerState::Ended => (),
+			Err(_) => { /* nothing we can do */ () },
 		}
+
 	}
 }
 
-impl<T:Send> LinkedSpawn for Worker<T> {
-	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
-	{
-		_spawn(Some(self.shared.clone()), Some(name), work)
-	}
-
-	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
-	{
-		_spawn(Some(self.shared.clone()), None, work)
-	}
-}
-
-impl LinkedSpawn for WorkerSelf {
-	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
-	{
-		_spawn(Some(self.shared.clone()), Some(name), work)
-	}
-
-	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
-		where F: FnOnce(WorkerSelf) -> Result<(),E>, F: Send + 'static, E: Send + 'static
-	{
-		_spawn(Some(self.shared.clone()), None, work)
-	}
-}
+// impl<T:Send> LinkedSpawn for Worker<T> {
+// 	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
+// 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static
+// 	{
+// 		_spawn(Some(self.shared.clone()), Some(name), work)
+// 	}
+//
+// 	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
+// 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static
+// 	{
+// 		_spawn(Some(self.shared.clone()), None, work)
+// 	}
+// }
+//
+// impl LinkedSpawn for WorkerSelf<E> {
+// 	fn spawn<F,E>(&self, name: String, work: F) -> Result<Worker<E>, io::Error>
+// 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static
+// 	{
+// 		_spawn(Some(self.shared.clone()), Some(name), work)
+// 	}
+//
+// 	fn spawn_anon<F,E>(&self, work: F) -> Result<Worker<E>, io::Error>
+// 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static
+// 	{
+// 		_spawn(Some(self.shared.clone()), None, work)
+// 	}
+// }
 
 
 pub fn test() {
