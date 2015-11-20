@@ -43,20 +43,37 @@ impl<T> OptionExt<T> for Option<T> {
 // 		where F: FnOnce(WorkerSelf<E>) -> Result<(),E>, F: Send + 'static, E: Send + 'static;
 // }
 
+struct ChildWorker<E> {
+	id: u32,
+	shared: Arc<Mutex<WorkerShared<E>>>,
+}
+
+impl ChildWorker {
+	fn eq(&self, other: &ChildWorker) {
+		return self.id == other.id;
+	}
+}
+
 struct WorkerShared<E> {
 	// XXX check deadlocks with parent/child interactions
 	signal: mpsc::Sender<()>,
-	children: Vec<Arc<Mutex<WorkerShared<E>>>>,
+	children: Vec<Arc<ChildWorker<E>>>,
 	thread: Option<JoinHandle<Result<(),E>>>,
 	// XXX if T is clone(), we wouldn't need Arc
 	result: Option<Result<(),WorkerError<E>>>,
 	parent: Option<Arc<Mutex<WorkerShared<E>>>>,
+	child_idx: u32;
 	detached: bool,
 }
 
 impl<E> WorkerShared<E> {
 	fn add_child(&mut self, child: Arc<Mutex<WorkerShared<E>>>) {
-		self.children.push(child);
+		let id = self.child_idx;
+		self.child_idx += 1;
+		self.children.push({
+			id: id,
+			shared: child
+		});
 	}
 
 	fn detach(&mut self) -> Result<(), TickError> {
@@ -64,7 +81,20 @@ impl<E> WorkerShared<E> {
 		match self.parent {
 			None => (),
 			Some(ref _parent) => {
-				// TODO: remove child (need to index by ID or something?)
+				let found = None;
+				let idx = 0;
+				// XXX each_with_index?
+				for candidate in _parent.children {
+					idx += 1;
+					if candidate.eq(child) {
+						found = Some(i);
+						break;
+					}
+				}
+				match found {
+					Some(i) => _parent.children.remove(i),
+					None => (),
+				}
 			},
 		};
 		Ok(())
@@ -84,7 +114,7 @@ impl<E> WorkerShared<E> {
 
 		// try to signal all children
 		self.children = self.children.into_iter().filter(|child| {
-			match child.lock() {
+			match child.shared.lock() {
 				Ok(child) =>
 					match child.signal.send(()) {
 						Ok(()) => true,
@@ -116,7 +146,7 @@ impl<E> WorkerShared<E> {
 			// XXX use drain() when stable
 			match self.children.pop() {
 				Some(child) => {
-					match child.lock() {
+					match child.shared.lock() {
 						Ok(child) => {
 							state = state.and(child.wait());
 						},
@@ -296,7 +326,7 @@ fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared<E>>>>, name: Option<String
 									// XXX use drain when stable
 									match parent.children.pop() {
 										Some(child) => {
-											match child.lock() {
+											match child.shared.lock() {
 												Ok(child) => {
 													let _:Result<(),mpsc::SendError<()>> = child.signal.send(());
 												},
@@ -319,6 +349,7 @@ fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared<E>>>>, name: Option<String
 
 	let shared = Arc::new(Mutex::new(WorkerShared {
 		children: Vec::new(),
+		child_idx: 0,
 		signal: sender.clone(),
 		result: None,
 		thread: Some(thread),
