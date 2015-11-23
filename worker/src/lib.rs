@@ -17,6 +17,24 @@ extern crate env_logger;
 #[macro_use]
 extern crate log;
 
+fn mutex_io_error() -> io::Error {
+	io::Error::new(io::ErrorKind::Other, "failed to acquire mutex")
+}
+
+fn mutex_worker_error() -> io::Error {
+	WorkerError::Aborted("could not unlock child state".into())
+}
+
+macro_rules! try_mutex {
+	($e: expr) => {
+		match $e {
+			Ok(x) => x,
+			Err(_) => { return Err(mutex_io_error()); },
+		}
+	}
+}
+
+
 trait OptionExt<T> {
 	// fn may<T,F,R>(&self, fn: F) -> Option<R>
 	fn bind<F,R>(&self, f: F) -> Option<R>
@@ -44,13 +62,19 @@ impl<T> OptionExt<T> for Option<T> {
 // }
 
 struct ChildWorker<E> {
-	id: u32,
+	child_id: u32,
 	shared: Arc<Mutex<WorkerShared<E>>>,
 }
 
-impl ChildWorker {
-	fn eq(&self, other: &ChildWorker) {
-		return self.id == other.id;
+impl<E> ChildWorker<E> {
+	// NOTE: child_id is only unique within the given
+	// parent - you cannot compare children from different
+	// parents
+	fn eq(&self, other: &WorkerShared<E>) -> bool {
+		match other.child_id {
+			Some(id) => id == self.child_id,
+			None => false,
+		}
 	}
 }
 
@@ -62,37 +86,47 @@ struct WorkerShared<E> {
 	// XXX if T is clone(), we wouldn't need Arc
 	result: Option<Result<(),WorkerError<E>>>,
 	parent: Option<Arc<Mutex<WorkerShared<E>>>>,
-	child_idx: u32;
+	next_child_id: u32,
+	child_id: Option<u32>,
 	detached: bool,
 }
 
 impl<E> WorkerShared<E> {
-	fn add_child(&mut self, child: Arc<Mutex<WorkerShared<E>>>) {
-		let id = self.child_idx;
-		self.child_idx += 1;
-		self.children.push({
-			id: id,
+	fn add_child(&mut self, child: Arc<Mutex<WorkerShared<E>>>) -> Result<(), io::Error> {
+		// XXX do we really need to unlock here?
+		let id = self.next_child_id;
+		{
+			let mut child_struct = try_mutex!(child.lock());
+			child_struct.child_id = Some(id);
+		}
+		self.next_child_id += 1;
+		self.children.push(Arc::new(ChildWorker {
+			child_id: id,
 			shared: child
-		});
+		}));
+		Ok(())
 	}
 
 	fn detach(&mut self) -> Result<(), TickError> {
 		self.detached = true;
 		match self.parent {
 			None => (),
-			Some(ref _parent) => {
-				let found = None;
-				let idx = 0;
+			Some(ref parent) => {
+				let mut found = None;
+				let mut idx = 0;
+				let mut parent = try!(parent.lock());
 				// XXX each_with_index?
-				for candidate in _parent.children {
-					idx += 1;
-					if candidate.eq(child) {
-						found = Some(i);
+				for candidate in parent.children.iter() {
+					if candidate.eq(self) {
+						found = Some(idx);
 						break;
 					}
+					idx += 1;
 				}
 				match found {
-					Some(i) => _parent.children.remove(i),
+					Some(i) => {
+						let _:Arc<ChildWorker<E>> = parent.children.remove(i);
+					},
 					None => (),
 				}
 			},
@@ -103,29 +137,32 @@ impl<E> WorkerShared<E> {
 	fn wait(&mut self) -> Result<(),WorkerError<E>> {
 		match self.result {
 			// check for already done
-			Some(r) => { return r; },
+			Some(ref r) => { return r.clone(); },
 			None => (),
 		};
 
 		let mut low_priority_error = Ok(());
-		let cannot_unlock = || {
-			low_priority_error = Err(WorkerError::Aborted("could not unlock child state".into()))
-		};
 
 		// try to signal all children
-		self.children = self.children.into_iter().filter(|child| {
+		self.children.retain(|child| {
 			match child.shared.lock() {
 				Ok(child) =>
 					match child.signal.send(()) {
 						Ok(()) => true,
-						Err(_) => { cannot_unlock(); false },
+						Err(_) => {
+							low_priority_error = mutex_worker_error();
+							false
+						},
 					},
-				Err(_) => { cannot_unlock(); false },
+				Err(_) => {
+					low_priority_error = mutex_worker_error();
+					false
+				},
 			}
-		}).collect();
+		});
 
 		// check our _own_ state
-		let state = match self.thread.take() {
+		let mut state = match self.thread.take() {
 			None => Err(
 				WorkerError::Aborted("worker.wait() called multiple times".into())
 			),
@@ -147,7 +184,7 @@ impl<E> WorkerShared<E> {
 			match self.children.pop() {
 				Some(child) => {
 					match child.shared.lock() {
-						Ok(child) => {
+						Ok(mut child) => {
 							state = state.and(child.wait());
 						},
 						Err(_) => cannot_unlock(),
@@ -208,6 +245,7 @@ impl<'a, T, E> convert::From<PoisonError<MutexGuard<'a, T>>> for WorkerError<E> 
 		WorkerError::Aborted("failed to acquire lock".into())
 	}
 }
+
 
 impl<E:fmt::Debug> convert::From<WorkerError<E>> for io::Error {
 	fn from(err: WorkerError<E>) -> io::Error {
@@ -349,7 +387,8 @@ fn _spawn<E, F>(parent: Option<Arc<Mutex<WorkerShared<E>>>>, name: Option<String
 
 	let shared = Arc::new(Mutex::new(WorkerShared {
 		children: Vec::new(),
-		child_idx: 0,
+		next_child_id: 0,
+		child_id: None,
 		signal: sender.clone(),
 		result: None,
 		thread: Some(thread),
