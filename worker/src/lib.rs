@@ -21,7 +21,7 @@ fn mutex_io_error() -> io::Error {
 	io::Error::new(io::ErrorKind::Other, "failed to acquire mutex")
 }
 
-fn mutex_worker_error() -> io::Error {
+fn mutex_worker_error<E>() -> WorkerError<E> {
 	WorkerError::Aborted("could not unlock child state".into())
 }
 
@@ -150,12 +150,12 @@ impl<E> WorkerShared<E> {
 					match child.signal.send(()) {
 						Ok(()) => true,
 						Err(_) => {
-							low_priority_error = mutex_worker_error();
+							low_priority_error = Err(mutex_worker_error());
 							false
 						},
 					},
 				Err(_) => {
-					low_priority_error = mutex_worker_error();
+					low_priority_error = Err(mutex_worker_error());
 					false
 				},
 			}
@@ -187,7 +187,9 @@ impl<E> WorkerShared<E> {
 						Ok(mut child) => {
 							state = state.and(child.wait());
 						},
-						Err(_) => cannot_unlock(),
+						Err(_) => {
+							low_priority_error = Err(mutex_worker_error());
+						},
 					}
 				},
 				None => { break; }
@@ -228,8 +230,8 @@ impl<E> Clone for WorkerError<E> {
 	fn clone(&self) -> WorkerError<E> {
 		match *self {
 			WorkerError::Cancelled => WorkerError::Cancelled,
-			WorkerError::Aborted(s) => WorkerError::Aborted(s.clone()),
-			WorkerError::Failed(e) => WorkerError::Failed(e.clone()),
+			WorkerError::Aborted(ref s) => WorkerError::Aborted(s.clone()),
+			WorkerError::Failed(ref e) => WorkerError::Failed(e.clone()),
 		}
 	}
 }
