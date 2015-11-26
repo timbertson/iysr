@@ -12,7 +12,7 @@ use std::convert;
 use std::hash;
 use std::error::{Error};
 use std::sync::mpsc;
-use std::sync::{Arc};
+use std::sync::{Arc,Mutex};
 use std::io::{BufRead, BufReader};
 use std::fmt;
 use rustc_serialize::json::{Json};
@@ -21,6 +21,8 @@ use monitor::*;
 use config::SystemdConfig;
 use util::read_all;
 use dbus::{Connection,BusType,Message,MessageItem,MessageType,Props,ConnectionItem,Path};
+use system_monitor::{SystemMonitor,Receiver};
+use worker::{Worker,WorkerSelf};
 use super::dbus_common::*;
 use super::errors::*;
 use super::systemd_common::*;
@@ -49,6 +51,14 @@ impl DbusNotify {
 			id: None,
 			title: title,
 			body: body,
+		}
+	}
+
+	fn empty() -> DbusNotify {
+		DbusNotify {
+			id: None,
+			title: "".into(),
+			body: "".into(),
 		}
 	}
 
@@ -124,6 +134,31 @@ impl DbusNotify {
 			},
 		}
 	}
+}
+
+fn run<'a>(thread: WorkerSelf<InternalError>, monitor: Arc<Mutex<SystemMonitor>>) -> Result<(), InternalError> {
+	let mut monitor = try!(monitor.lock());
+	let receiver = try!(monitor.subscribe());
+	let mut notification = None;
+	let conn = try!(Connection::get_private(BusType::Session));
+	loop {
+		let _ = try!(receiver.recv());
+		try!(thread.tick());
+		let mut _notification = match notification {
+			None => DbusNotify::empty(),
+			Some(n) => n,
+		};
+		_notification.set_title("things".into());
+		_notification.set_body("stuff".into());
+		try!(_notification.show(&conn));
+		notification = Some(_notification)
+	}
+	Ok(())
+	
+}
+
+pub fn main(monitor: Arc<Mutex<SystemMonitor>>, parent: &WorkerSelf<InternalError>) -> Result<Worker<InternalError>,io::Error> {
+	parent.spawn("dbus notify".into(), move |t| run(t, monitor))
 }
 
 pub fn test() -> Result<(),InternalError> {

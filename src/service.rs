@@ -126,7 +126,7 @@ impl Server {
 	// lives less long than the data it references
 	fn try_handle<'a, 'stream: 'a>(&self, response: &'a mut Response<'stream, Streaming>) -> Result<(), InternalError> {
 		let receiver = {
-			try!(self.monitor.lock().unwrap().subscribe())
+			try!(try!(self.monitor.lock()).subscribe())
 		};
 
 		let mut writer = WriteSSE {

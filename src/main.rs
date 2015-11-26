@@ -80,9 +80,11 @@ fn run(config: Config) -> Result<(), errors::InternalError> {
 		push_sources
 	))));
 
-	let mut reaper = try!(worker::spawn("reaper".into(), |t| {
+	let mut reaper = try!(worker::spawn("reaper".into(), move |t| {
 		let mut services : Vec<worker::Worker<InternalError>> = Vec::new();
-		services.push(try!(service::main(monitor, &t)));
+		// TODO: configure which services run
+		services.push(try!(service::main(monitor.clone(), &t)));
+		services.push(try!(dbus_notify::main(monitor.clone(), &t)));
 		t.await_cancel();
 		Err(InternalError::new("reaper cancelled".into()))
 	}));

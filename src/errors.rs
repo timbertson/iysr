@@ -8,6 +8,7 @@ use std::string;
 use std::io;
 use std::convert;
 use std::ops::Deref;
+use std::sync;
 use std::sync::mpsc;
 use std::sync::{Arc};
 use std::cmp::Ordering;
@@ -73,12 +74,8 @@ coerce_to_internal_error!(
 	, chrono::format::ParseError
 	, hyper::error::Error
 );
-coerce_to_internal_error!(
-	  generic(mpsc::SendError<T>, T)
-);
-coerce_to_internal_error!(
-	  generic(mpsc::TrySendError<T>, T)
-);
+coerce_to_internal_error!(generic(mpsc::SendError<T>, T));
+coerce_to_internal_error!(generic(mpsc::TrySendError<T>, T));
 
 impl Error for InternalError {
 	fn description(&self) -> &str {
@@ -102,5 +99,11 @@ impl convert::From<TickError> for InternalError {
 			TickError::Cancelled => InternalError::new(String::from("worker cancelled")),
 			TickError::Aborted(reason) => InternalError::new(format!("worker aborted: {}", reason)),
 		}
+	}
+}
+
+impl<T> convert::From<sync::PoisonError<T>> for InternalError {
+	fn from(_err: sync::PoisonError<T>) -> InternalError {
+		InternalError::new(String::from("lock poisoned"))
 	}
 }
