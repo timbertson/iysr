@@ -513,7 +513,7 @@ impl<E:Send+Sync+'static> Drop for Worker<E> {
 	fn drop(&mut self) {
 		let attached = match self.shared.lock() {
 			Ok(shared) => !shared.detached && shared.result.is_none(),
-			Err(_) => { false /* nothing we can do */ }
+			Err(_) => { false } // nothing we can do
 		};
 		if attached {
 			warn!("thread dropped without `detach` or `wait()`");

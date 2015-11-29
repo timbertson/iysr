@@ -16,6 +16,7 @@ use std::sync::{Arc,Mutex};
 use std::io::{BufRead, BufReader};
 use std::fmt;
 use rustc_serialize::json::{Json};
+use std::time;
 use chrono::{DateTime,Local};
 use monitor::*;
 use config::SystemdConfig;
@@ -26,6 +27,7 @@ use worker::{Worker,WorkerSelf};
 use super::dbus_common::*;
 use super::errors::*;
 use super::systemd_common::*;
+use super::system_monitor::StateSnapshot;
 extern crate dbus;
 
 const NOTIFY_IFACE: &'static str = "org.freedesktop.Notifications";
@@ -33,10 +35,12 @@ const NOTIFY_PATH: &'static str = "/org/freedesktop/Notifications";
 const NOTIFY_SHOW_METHOD: &'static str = "Notify";
 const NOTIFY_HIDE_METHOD: &'static str = "CloseNotification";
 
-struct DbusNotify {
+struct DbusNotify<'a> {
+	conn: &'a Connection,
 	id: Option<u32>,
 	title: String,
 	body: String,
+	timeout: i32,
 }
 
 fn method_call(name: &str) -> Result<Message,InternalError> {
@@ -45,20 +49,31 @@ fn method_call(name: &str) -> Result<Message,InternalError> {
 }
 
 
-impl DbusNotify {
-	fn new(title: String, body: String) -> DbusNotify {
-		DbusNotify {
-			id: None,
-			title: title,
-			body: body,
+impl<'a> DbusNotify<'a> {
+	fn convert_timeout(t: Option<time::Duration>) -> i32 {
+		match t {
+			Some(t) => (t.as_secs() * 1000) as i32 + (t.subsec_nanos() / 1000000) as i32,
+			None => 0,
 		}
 	}
 
-	fn empty() -> DbusNotify {
+	fn new(conn: &'a Connection, title: String, body: String, timeout: Option<time::Duration>) -> DbusNotify {
 		DbusNotify {
+			conn: conn,
+			id: None,
+			title: title,
+			body: body,
+			timeout: DbusNotify::convert_timeout(timeout),
+		}
+	}
+
+	fn empty(conn: &'a Connection, timeout: Option<time::Duration>) -> DbusNotify {
+		DbusNotify {
+			conn: conn,
 			id: None,
 			title: "".into(),
 			body: "".into(),
+			timeout: DbusNotify::convert_timeout(timeout),
 		}
 	}
 
@@ -70,13 +85,18 @@ impl DbusNotify {
 		self.body = body;
 	}
 
-	fn show(&mut self, conn: &Connection) -> Result<(), InternalError> {
+	fn set_timeout(&mut self, t: Option<time::Duration>) {
+		self.timeout = DbusNotify::convert_timeout(t);
+	}
+
+	fn show(&mut self) -> Result<(), InternalError> {
 		let id = match self.id {
 			None => 0,
 			Some(i) => i,
 		};
 		let mut method = try!(method_call(NOTIFY_SHOW_METHOD));
 		let actions: &[&str] = &[];
+		debug!("DbusNotify showing notification");
 		method.append_items(&[
 			// STRING app_name;
 			MessageItem::Str("iysr".into()),
@@ -107,7 +127,7 @@ impl DbusNotify {
 			MessageItem::Int32(0i32)
 		]);
 
-		let response = try!(call_method(conn, method));
+		let response = try!(call_method(self.conn, method));
 		match response.get_items().iter().next() {
 			Some(&MessageItem::UInt32(id)) => {
 				debug!("Created notification {}", id);
@@ -120,7 +140,7 @@ impl DbusNotify {
 		Ok(())
 	}
 
-	fn hide(&mut self, conn: &Connection) -> Result<(), InternalError> {
+	fn hide(&mut self) -> Result<(), InternalError> {
 		match self.id {
 			None => {
 				debug!("hide(): no active notification");
@@ -129,32 +149,58 @@ impl DbusNotify {
 			Some(id) => {
 				let method = try!(method_call(NOTIFY_HIDE_METHOD))
 					.append(MessageItem::UInt32(id));
-				try!(call_method(conn, method));
+				try!(call_method(self.conn, method));
+				self.id = None;
 				Ok(())
 			},
 		}
 	}
 }
 
+impl<'a> Drop for DbusNotify<'a> {
+	fn drop(&mut self) {
+		if self.timeout == 0 {
+			ignore_error!(self.hide(), "closing notification");
+		}
+	}
+}
+
+fn notification_contents(_state: &StateSnapshot) -> Option<String> {
+	Some("TODO: summarize state".into())
+}
+
 fn run<'a>(thread: WorkerSelf<InternalError>, monitor: Arc<Mutex<SystemMonitor>>) -> Result<(), InternalError> {
+	info!("Starting DBus notification service ...");
 	let mut monitor = try!(monitor.lock());
 	let receiver = try!(monitor.subscribe());
-	let mut notification = None;
 	let conn = try!(Connection::get_private(BusType::Session));
+	let mut persistent_notification = DbusNotify::empty(&conn, None);
+	persistent_notification.set_title("iysr state".into());
+	let snapshot = StateSnapshot::new();
 	loop {
-		let _ = try!(receiver.recv());
+		let data = try!(receiver.recv());
+		debug!("dbus_notify saw data...");
+		if snapshot.update(&data) {
+			match notification_contents(&snapshot) {
+				None => {
+					try!(persistent_notification.hide());
+				},
+				Some(msg) => {
+					persistent_notification.set_body(msg);
+					try!(persistent_notification.show());
+				},
+			}
+		} else {
+			// just an event - create a new one
+			let mut notification = DbusNotify::new(
+				&conn,
+				"iysr event".into(),
+				"TODO".into(),
+				Some(time::Duration::from_secs(10)));
+			try!(notification.show());
+		}
 		try!(thread.tick());
-		let mut _notification = match notification {
-			None => DbusNotify::empty(),
-			Some(n) => n,
-		};
-		_notification.set_title("things".into());
-		_notification.set_body("stuff".into());
-		try!(_notification.show(&conn));
-		notification = Some(_notification)
 	}
-	Ok(())
-	
 }
 
 pub fn main(monitor: Arc<Mutex<SystemMonitor>>, parent: &WorkerSelf<InternalError>) -> Result<Worker<InternalError>,io::Error> {
@@ -164,15 +210,15 @@ pub fn main(monitor: Arc<Mutex<SystemMonitor>>, parent: &WorkerSelf<InternalErro
 pub fn test() -> Result<(),InternalError> {
 	let conn = try!(Connection::get_private(BusType::Session));
 	thread::sleep_ms(3000);
-	let mut n = DbusNotify::new("hello there".into(), "It's me!".into());
+	let mut n = DbusNotify::new(&conn, "hello there".into(), "It's me!".into(), None);
 	println!("showing notification");
-	try!(n.show(&conn));
+	try!(n.show());
 	thread::sleep_ms(3000);
 	println!("updating notification");
 	n.set_body("It _was_ me...".into());
-	try!(n.show(&conn));
+	try!(n.show());
 	thread::sleep_ms(3000);
 	println!("hiding notification");
-	try!(n.hide(&conn));
+	try!(n.hide());
 	Ok(())
 }

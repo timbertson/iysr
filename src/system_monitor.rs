@@ -105,21 +105,27 @@ impl ThreadState {
 	}
 }
 
-struct StateSnapshot {
+pub struct StateSnapshot {
 	state: SharedRef<HashMap<String, Arc<Update>>>,
 }
 
 impl StateSnapshot {
-	fn new() -> StateSnapshot {
+	pub fn new() -> StateSnapshot {
 		StateSnapshot { state: Arc::new(Mutex::new(HashMap::new())) }
 	}
 
-	fn update(&self, update: &Arc<Update>) {
-		let mut state = self.state.lock().unwrap();
-		state.insert(update.source.id.clone(), update.clone());
+	pub fn update(&self, update: &Arc<Update>) -> bool {
+		match update.scope {
+			UpdateScope::Partial => false,
+			UpdateScope::Snapshot => {
+				let mut state = self.state.lock().unwrap();
+				state.insert(update.source.id.clone(), update.clone());
+				true
+			},
+		}
 	}
 
-	fn values(&self) -> Vec<Arc<Update>> {
+	pub fn values(&self) -> Vec<Arc<Update>> {
 		let state = self.state.lock().unwrap();
 		state.values().map(|update| update.clone()).collect()
 	}
@@ -222,10 +228,7 @@ impl SystemMonitor {
 		loop {
 			let data : Arc<Update> = try!(event_readable.recv());
 			{
-				match data.scope {
-					UpdateScope::Partial => (),
-					UpdateScope::Snapshot => last_state.update(&data),
-				}
+				last_state.update(&data);
 				let listeners = listeners.lock().unwrap();
 				for listener in listeners.values() {
 					ignore_error!(listener.try_send(data.clone()), "sending data to listener");
