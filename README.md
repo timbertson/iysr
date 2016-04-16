@@ -1,5 +1,7 @@
 # iysr - a simple service monitor for `systemd`
 
+<img src="http://gfxmonk.net/dist/status/project/iysr.png">
+
 _is your stuff running?_
 
 `iysr` (pronounced "eyes-a", or "visor" without the "v") is a service monitoring tool built
